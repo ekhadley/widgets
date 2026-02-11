@@ -1,0 +1,13 @@
+[package]
+name = "panel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cosmic-text = "0.17.1"
+libc = "0.2.181"
+serde = { version = "1", features = ["derive"] }
+smithay-client-toolkit = { version = "0.20.0", features = ["calloop"] }
+tiny-skia = "0.12.0"
+toml = "0.8"
+wayland-client = "0.31.12"
