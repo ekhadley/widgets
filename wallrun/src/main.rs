@@ -612,6 +612,23 @@ impl PointerHandler for App {
                         }
                     }
                 }
+                PointerEventKind::Motion { .. } => {
+                    let (grid_top, cell_w, _, _, _, cell_h, _) = self.grid_metrics();
+                    let (x_off, y_off) = self.grid_offsets();
+                    let ecols = self.effective_cols();
+                    let (mx, my) = (event.position.0 as f32, event.position.1 as f32);
+                    if mx >= x_off && my > grid_top + y_off {
+                        let row = ((my - grid_top - y_off) / cell_h) as usize;
+                        let col = ((mx - x_off) / cell_w) as usize;
+                        if col < ecols {
+                            let idx = self.scroll_offset + row * ecols + col;
+                            if idx < self.filtered.len() && idx != self.selected {
+                                self.selected = idx;
+                                redraw = true;
+                            }
+                        }
+                    }
+                }
                 PointerEventKind::Axis { ref vertical, .. } => {
                     let (_, _, _, _, _, _, visible) = self.grid_metrics();
                     let cols = self.effective_cols();
