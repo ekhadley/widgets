@@ -6,6 +6,10 @@ Bespoke Wayland desktop widgets, written from scratch in Rust against sctk + tin
 
 Coding agents have made it practical to write and maintain bespoke native widgets. The schlep of wiring up Wayland protocols, pixel rendering, and input handling by hand used to make frameworks the obvious choice. Now that agents can just do that work, you get the upside of from-scratch widgets — tiny binaries, no runtime overhead, full control over every pixel — without the prohibitive cost of writing all the boilerplate yourself.
 
+## Workflow
+
+After making changes to any widget, run `make install` in that widget's directory to build and install the binary.
+
 ## Shared patterns
 
 All widgets follow the same architecture:
@@ -128,6 +132,7 @@ bt_device_2 = "EC:81:93:AC:8B:60"
 ## Todo
 
 ### panel
-- [ ] Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
+- Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
+- pausing a timer that is negative sets it to 0:00
 
 ### wallrun

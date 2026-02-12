@@ -297,7 +297,7 @@ const VOL_MAX: f32 = 2.0;
 // Timers
 const TIMER_SCROLL_STEP: i64 = 60;
 // Timers
-const INACTIVE_ALPHA: f32 = 0.6;
+const INACTIVE_ALPHA: f32 = 0.8;
 
 // Timing
 const TICK_MS: u64 = 100;

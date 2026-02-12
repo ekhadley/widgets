@@ -13,7 +13,9 @@ use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::registry_handlers;
 use sctk::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers};
 use sctk::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use sctk::seat::pointer::cursor_shape::CursorShapeManager;
 use sctk::seat::{Capability, SeatHandler, SeatState};
+use sctk::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use sctk::shell::wlr_layer::{
     KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
@@ -182,6 +184,7 @@ struct App {
     layer: LayerSurface,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    cursor_shape_manager: CursorShapeManager,
     pool: SlotPool,
     width: u32,
     height: u32,
@@ -589,10 +592,15 @@ impl KeyboardHandler for App {
 }
 
 impl PointerHandler for App {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+    fn pointer_frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, pointer: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         let mut redraw = false;
         for event in events {
             match event.kind {
+                PointerEventKind::Enter { serial, .. } => {
+                    let device = self.cursor_shape_manager.get_shape_device(pointer, qh);
+                    device.set_shape(serial, Shape::Default);
+                    device.destroy();
+                }
                 PointerEventKind::Press { button: 0x110, .. } => {
                     let (grid_top, cell_w, _, _, _, cell_h, _) = self.grid_metrics();
                     let (x_off, y_off) = self.grid_offsets();
@@ -801,6 +809,7 @@ fn main() {
     let compositor = CompositorState::bind(&globals, &qh).unwrap();
     let layer_shell = LayerShell::bind(&globals, &qh).unwrap();
     let shm = Shm::bind(&globals, &qh).unwrap();
+    let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("wallrun"), None);
@@ -818,6 +827,7 @@ fn main() {
         layer,
         keyboard: None,
         pointer: None,
+        cursor_shape_manager,
         pool,
         width,
         height,
