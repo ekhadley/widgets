@@ -301,7 +301,7 @@ const INACTIVE_ALPHA: f32 = 0.8;
 
 // Timing
 const TICK_MS: u64 = 100;
-const AUDIO_REFRESH_COOLDOWN: u64 = 2;
+const AUDIO_REFRESH_COOLDOWN: u64 = 1;
 
 // Audio icon
 const AUDIO_ICON_NUDGE: f32 = -0.1;
