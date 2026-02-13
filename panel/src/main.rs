@@ -64,7 +64,7 @@ fn load_config() -> Config {
     let path = config_dir().join("panel.toml");
     match std::fs::read_to_string(&path) {
         Ok(s) => match toml::from_str(&s) {
-            Ok(cfg) => { eprintln!("panel: loaded config from {}", path.display()); cfg }
+            Ok(cfg) => cfg,
             Err(e) => { eprintln!("panel: failed to parse {}: {e}", path.display()); Config::default() }
         }
         Err(_) => Config::default(),
