@@ -76,10 +76,7 @@ fn load_config() -> Config {
         Err(_) => return Config::default(),
     };
     match toml::from_str(&content) {
-        Ok(cfg) => {
-            eprintln!("wallrun: loaded config from {}", path.display());
-            cfg
-        }
+        Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("wallrun: failed to parse {}: {e}", path.display());
             Config::default()
