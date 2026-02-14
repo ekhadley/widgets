@@ -4,9 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use smithay_client_toolkit as sctk;
 use sctk::compositor::{CompositorHandler, CompositorState};
 use sctk::output::{OutputHandler, OutputState};
@@ -328,9 +328,53 @@ struct Item {
     icon_w: u32,
     icon_h: u32,
     terminal: bool,
+    desktop_id: String,
 }
 
-fn load_desktop_entries(icon_size: u32) -> Vec<Item> {
+// --- Frecency ---
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct FrecencyEntry {
+    count: u32,
+    last: u64,
+}
+
+fn frecency_state_path() -> PathBuf {
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/state"));
+    base.join("widgets/grimoire/frecency.toml")
+}
+
+fn load_frecency() -> HashMap<String, FrecencyEntry> {
+    let path = frecency_state_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => match toml::from_str(&s) {
+            Ok(state) => state,
+            Err(e) => {
+                eprintln!("grimoire: failed to parse {}: {e}", path.display());
+                HashMap::new()
+            }
+        },
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_frecency(state: &HashMap<String, FrecencyEntry>) {
+    let path = frecency_state_path();
+    std::fs::create_dir_all(path.parent().unwrap()).ok();
+    let content = toml::to_string(state).unwrap();
+    if let Err(e) = std::fs::write(&path, content) {
+        eprintln!("grimoire: failed to save frecency: {e}");
+    }
+}
+
+fn frecency_score(entry: &FrecencyEntry, now: u64) -> f64 {
+    let hours = now.saturating_sub(entry.last) as f64 / 3600.0;
+    entry.count as f64 / (1.0 + hours / 72.0)
+}
+
+fn load_desktop_entries(icon_size: u32, frecency: &HashMap<String, FrecencyEntry>) -> Vec<Item> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut items: Vec<Item> = Vec::new();
 
@@ -343,13 +387,14 @@ fn load_desktop_entries(icon_size: u32) -> Vec<Item> {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "desktop") { continue; }
             let filename = path.file_name().unwrap().to_string_lossy().to_string();
+            let desktop_id = path.file_stem().unwrap().to_string_lossy().to_string();
 
             if let Some((name, exec, comment, icon_name, terminal)) = parse_desktop_file(&path) {
                 let (icon_data, icon_w, icon_h) = match resolve_icon(&icon_name, icon_size) {
                     Some((d, w, h)) => (Some(d), w, h),
                     None => (None, 0, 0),
                 };
-                let item = Item { name, exec, comment, icon_data, icon_w, icon_h, terminal };
+                let item = Item { name, exec, comment, icon_data, icon_w, icon_h, terminal, desktop_id };
 
                 if let Some(&idx) = seen.get(&filename) {
                     items[idx] = item; // local overrides system
@@ -360,7 +405,13 @@ fn load_desktop_entries(icon_size: u32) -> Vec<Item> {
             }
         }
     }
-    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    items.sort_by(|a, b| {
+        let sa = frecency.get(&a.desktop_id).map_or(0.0, |e| frecency_score(e, now));
+        let sb = frecency.get(&b.desktop_id).map_or(0.0, |e| frecency_score(e, now));
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     items
 }
 
@@ -369,7 +420,7 @@ fn load_stdin_items() -> Vec<Item> {
     stdin.lock().lines().flatten().map(|line| {
         Item {
             name: line.clone(), exec: line, comment: String::new(),
-            icon_data: None, icon_w: 0, icon_h: 0, terminal: false,
+            icon_data: None, icon_w: 0, icon_h: 0, terminal: false, desktop_id: String::new(),
         }
     }).collect()
 }
@@ -413,6 +464,7 @@ struct App {
     cols: usize,
     show_comments: bool,
     search_comments: bool,
+    frecency: HashMap<String, FrecencyEntry>,
 }
 
 const BAR_H: f32 = 50.0;
@@ -484,6 +536,13 @@ impl App {
             self.exit = true;
             return;
         }
+
+        // Update frecency
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let entry = self.frecency.entry(item.desktop_id.clone()).or_default();
+        entry.count += 1;
+        entry.last = now;
+        save_frecency(&self.frecency);
 
         // drun: fork+exec
         let exec_cmd = if item.terminal {
@@ -966,8 +1025,9 @@ fn main() {
         }
     }
 
+    let frecency = load_frecency();
     let items = match mode {
-        Mode::Drun => load_desktop_entries(cfg.icon_size),
+        Mode::Drun => load_desktop_entries(cfg.icon_size, &frecency),
         Mode::Dmenu => load_stdin_items(),
     };
 
@@ -1035,6 +1095,7 @@ fn main() {
         cols: cfg.columns.max(1),
         show_comments: cfg.show_comments,
         search_comments: cfg.search_comments,
+        frecency,
     };
 
     loop {
