@@ -578,16 +578,16 @@ impl App {
         let ph = pixmap.height();
 
         // Search bar background
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, width, BAR_H as u32, bar_bg);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, width, BAR_H as u32, bar_bg, bg_alpha);
 
         // Search bar bottom border
-        fill_rect(pixmap.data_mut(), pw, ph, 0, BAR_H as u32 - 2, width, 2, bar_border);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, BAR_H as u32 - 2, width, 2, bar_border, bg_alpha);
 
         // Window border
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, width, 2, border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, height - 2, width, 2, border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, 2, height, border);
-        fill_rect(pixmap.data_mut(), pw, ph, width - 2, 0, 2, height, border);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, width, 2, border, bg_alpha);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, height - 2, width, 2, border, bg_alpha);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, 2, height, border, bg_alpha);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, width - 2, 0, 2, height, border, bg_alpha);
 
         // Search text or placeholder
         if self.input.is_empty() {

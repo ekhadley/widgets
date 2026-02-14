@@ -322,7 +322,7 @@ impl App {
         let ph = pixmap.height();
 
         // Search bar
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, self.width, BAR_H, bar_bg);
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, self.width, BAR_H, bar_bg, c.background_alpha);
 
         // Window outline
         fill_rect(pixmap.data_mut(), pw, ph, 0, 0, self.width, 2, bar_border);

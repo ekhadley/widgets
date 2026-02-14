@@ -177,6 +177,14 @@ show_comments = true
 - **panel: timer alert** — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - **cliphistory** — clipboard history picker. Reads from cliphist (or similar wl-clipboard history), presents as a filterable list overlay. Same fuzzy-search-and-pick pattern.
 
+## Future applications
+
+Larger projects that go beyond simple overlays — closer to full applications, but still built from scratch with the same stack.
+
+- **systemd-center** — systemd unit manager. List/filter units, show status, start/stop/restart/enable/disable. Shells out to `systemctl`. Tabbed or sectioned view for services, timers, sockets. Maybe a journal tail view per unit.
+- **notif** — notification daemon implementing the freedesktop notification spec. Receives notifications over D-Bus, renders them as transient layer-shell popups. Configurable timeout, action buttons, history recall overlay.
+- **blueman** — Bluetooth manager. Scans/pairs/connects/disconnects devices via `bluetoothctl` or D-Bus. Shows device list with connection state, battery level where available. Quick-switch between paired audio devices.
+
 ## Todo
 
 ### panel
