@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use libc;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
+use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit as sctk;
 use sctk::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -38,7 +38,8 @@ use tiny_skia::Pixmap;
 #[serde(default)]
 struct Config {
     color_file: Option<String>,
-    font_family: Option<String>,
+    font: String,
+    icon_font: String,
     font_size: f32,
     timer1_duration: u64,
     timer2_duration: u64,
@@ -50,7 +51,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             color_file: Some("~/.cache/wal/colors-panel.toml".into()),
-            font_family: Some("Google Sans Code".into()),
+            font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
+            icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
             font_size: 30.0,
             timer1_duration: 3600,
             timer2_duration: 900,
@@ -380,7 +382,8 @@ struct App {
     swash_cache: SwashCache,
     colors: Colors,
     font_size: f32,
-    font_family: Option<String>,
+    font_family: String,
+    icon_family: String,
     // Timer state
     timer1_duration: u64,
     timer1_started: u64,
@@ -472,19 +475,19 @@ impl App {
         // Timer split (vertical, within timer area of center column)
         fill_rect(pixmap.data_mut(), pw, ph, lay.timer1.x + lay.timer1.w, lay.timer1.y, INNER, lay.timer1.h, divider);
 
-        let fa = Some("Font Awesome 7 Free".into());
+        let fa = &self.icon_family;
 
         // --- Toggle tile (top-left) ---
         let icon_char = if self.is_dim { "\u{f186}" } else { "\u{f185}" };
         let mut icon_color = if self.is_dim { c.accent[3] } else { c.accent[2] };
         icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let icon_w = measure_text(&mut self.font_system, icon_char, ICON_SIZE, &fa, Weight::BLACK);
+        let icon_w = measure_text(&mut self.font_system, icon_char, ICON_SIZE, fa, Weight::BLACK);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             icon_char,
             center_x(lay.toggle.x as f32, lay.toggle.w as f32, icon_w),
             center_y(lay.toggle.y as f32, lay.toggle.h as f32, ICON_SIZE, 0.0),
             ICON_SIZE, lay.toggle.w as f32, lay.toggle.h as f32, icon_color,
-            &fa, Weight::BLACK);
+            fa, Weight::BLACK);
 
         // --- Dots tile (bottom-left, vertical) ---
         let dot_char = "\u{25cf}";
@@ -573,13 +576,13 @@ impl App {
         let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
         let mut ai_color = if self.muted { alpha_color(c.accent[4], VOL_BG_ALPHA) } else { c.accent[4] };
         ai_color = alpha_color(ai_color, if self.hover == HoverTile::Audio { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let ai_w = measure_text(&mut self.font_system, audio_icon, ICON_SIZE, &fa, Weight::BLACK);
+        let ai_w = measure_text(&mut self.font_system, audio_icon, ICON_SIZE, fa, Weight::BLACK);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             audio_icon,
             center_x(lay.audio.x as f32, lay.audio.w as f32, ai_w),
             center_y(lay.audio.y as f32, lay.audio.h as f32, ICON_SIZE, AUDIO_ICON_NUDGE),
             ICON_SIZE, lay.audio.w as f32, lay.audio.h as f32, ai_color,
-            &fa, Weight::BLACK);
+            fa, Weight::BLACK);
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
@@ -766,15 +769,11 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
     }
 }
 
-fn make_attrs(family: &Option<String>, weight: Weight) -> Attrs<'_> {
-    let attrs = Attrs::new().weight(weight);
-    match family {
-        Some(name) => attrs.family(Family::Name(name)),
-        None => attrs,
-    }
+fn make_attrs(family: &str, weight: Weight) -> Attrs<'_> {
+    Attrs::new().weight(weight).family(cosmic_text::Family::Name(family))
 }
 
-fn measure_text(font_system: &mut FontSystem, text: &str, font_size: f32, family: &Option<String>, weight: Weight) -> f32 {
+fn measure_text(font_system: &mut FontSystem, text: &str, font_size: f32, family: &str, weight: Weight) -> f32 {
     let mut buf = Buffer::new(font_system, Metrics::new(font_size, font_size * LINE_HEIGHT));
     buf.set_size(font_system, None, None);
     buf.set_text(font_system, text, &make_attrs(family, weight), Shaping::Advanced, None);
@@ -785,7 +784,7 @@ fn measure_text(font_system: &mut FontSystem, text: &str, font_size: f32, family
 fn render_text(
     pixmap: &mut Pixmap, font_system: &mut FontSystem, swash_cache: &mut SwashCache,
     text: &str, x: f32, y: f32, font_size: f32, max_w: f32, max_h: f32, color: [u8; 3],
-    family: &Option<String>, weight: Weight,
+    family: &str, weight: Weight,
 ) {
     let line_h = font_size * LINE_HEIGHT;
     let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_h));
@@ -988,6 +987,15 @@ fn main() {
 
     let pool = SlotPool::new((WIDTH * HEIGHT * 4) as usize, &shm).unwrap();
 
+    let font_data = std::fs::read(expand_path(&cfg.font)).expect("failed to read font file");
+    let icon_data = std::fs::read(expand_path(&cfg.icon_font)).expect("failed to read icon font file");
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_data(font_data);
+    let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
+    db.load_font_data(icon_data);
+    let icon_family = db.faces().last().expect("icon font file contains no faces").families[0].0.clone();
+    let font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -1000,11 +1008,12 @@ fn main() {
         width: WIDTH,
         height: HEIGHT,
         exit: false,
-        font_system: FontSystem::new(),
+        font_system,
         swash_cache: SwashCache::new(),
         colors,
         font_size: cfg.font_size,
-        font_family: cfg.font_family,
+        font_family,
+        icon_family,
         timer1_duration: ts.timer1_duration,
         timer1_started: ts.timer1_started,
         timer2_duration: ts.timer2_duration,

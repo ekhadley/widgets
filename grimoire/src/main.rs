@@ -1,19 +1,22 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use serde::Deserialize;
 use smithay_client_toolkit as sctk;
-use sctk::reexports::calloop::{EventLoop, LoopHandle};
-use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::compositor::{CompositorHandler, CompositorState};
 use sctk::output::{OutputHandler, OutputState};
+use sctk::reexports::calloop::{EventLoop, LoopHandle};
+use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::registry_handlers;
 use sctk::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers};
-use sctk::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use sctk::seat::pointer::cursor_shape::CursorShapeManager;
+use sctk::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use sctk::seat::{Capability, SeatHandler, SeatState};
 use sctk::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use sctk::shell::wlr_layer::{
@@ -27,42 +30,38 @@ use sctk::{
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
     delegate_registry, delegate_seat, delegate_shm,
 };
+use tiny_skia::Pixmap;
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
-use tiny_skia::Pixmap;
 use wayland_client::{Connection, QueueHandle};
 
 // --- Config ---
 
-#[derive(Deserialize, Clone)]
-#[serde(untagged)]
-enum Dimension {
-    Fixed(u32),
-    Auto(#[allow(dead_code)] String),
-}
-
-impl Default for Dimension {
-    fn default() -> Self { Dimension::Fixed(0) }
-}
-
 #[derive(Deserialize)]
 #[serde(default)]
 struct Config {
-    columns: usize,
-    window_width: Dimension,
-    window_height: Dimension,
-    font_size: f32,
-    label_font_size: f32,
     color_file: Option<String>,
-    show_labels: bool,
     font: String,
+    font_size: f32,
+    comment_font_size: f32,
+    icon_size: u32,
+    window_width: u32,
+    window_height: u32,
+    terminal: String,
+    columns: usize,
+    show_comments: bool,
+    search_comments: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { columns: 3, window_width: Dimension::Fixed(800), window_height: Dimension::Fixed(600),
-               font_size: 20.0, label_font_size: 14.0, color_file: None, show_labels: true,
-               font: "~/.local/share/fonts/GoogleSansCode-Regular.ttf".into() }
+        Self {
+            color_file: None, font: "~/.local/share/fonts/GoogleSansCode-Regular.ttf".into(),
+            font_size: 18.0, comment_font_size: 14.0, icon_size: 32,
+            window_width: 600, window_height: 400,
+            terminal: "ghostty -e".into(),
+            columns: 1, show_comments: true, search_comments: false,
+        }
     }
 }
 
@@ -70,7 +69,7 @@ fn load_config() -> Config {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".config"));
-    let path = base.join("widgets/wallrun.toml");
+    let path = base.join("widgets/grimoire.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return Config::default(),
@@ -78,7 +77,7 @@ fn load_config() -> Config {
     match toml::from_str(&content) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("wallrun: failed to parse {}: {e}", path.display());
+            eprintln!("grimoire: failed to parse {}: {e}", path.display());
             Config::default()
         }
     }
@@ -89,11 +88,12 @@ fn load_config() -> Config {
 struct Colors {
     background: [u8; 3],
     background_alpha: u8,
+    border: [u8; 3],
     bar_bg: [u8; 3],
     bar_border: [u8; 3],
     text: [u8; 3],
+    text_comment: [u8; 3],
     text_placeholder: [u8; 3],
-    label: [u8; 3],
     selection: [u8; 3],
     selection_alpha: u8,
 }
@@ -102,10 +102,11 @@ impl Default for Colors {
     fn default() -> Self {
         Self {
             background: [0x1a, 0x1a, 0x2e], background_alpha: 0xff,
-            bar_bg: [0x2a, 0x2a, 0x4e],
-            bar_border: [0x4a, 0x4a, 0x6e], text: [0xe0, 0xe0, 0xe0],
-            text_placeholder: [0x80, 0x80, 0x80], label: [0xc0, 0xc0, 0xc0],
-            selection: [0x40, 0x40, 0x90], selection_alpha: 0xff,
+            border: [0x4a, 0x4a, 0x6e],
+            bar_bg: [0x2a, 0x2a, 0x4e], bar_border: [0x4a, 0x4a, 0x6e],
+            text: [0xe0, 0xe0, 0xe0], text_comment: [0x80, 0x80, 0x90],
+            text_placeholder: [0x60, 0x60, 0x70],
+            selection: [0x40, 0x40, 0x90], selection_alpha: 0xcc,
         }
     }
 }
@@ -147,11 +148,12 @@ fn load_colors(path: Option<&str>) -> Colors {
                     if let Some(c) = parse_hex(val) {
                         match key {
                             "background" => colors.background = c,
+                            "border" => colors.border = c,
                             "bar_bg" => colors.bar_bg = c,
                             "bar_border" => colors.bar_border = c,
                             "text" => colors.text = c,
+                            "text_comment" => colors.text_comment = c,
                             "text_placeholder" => colors.text_placeholder = c,
-                            "label" => colors.label = c,
                             "selection" => colors.selection = c,
                             _ => {}
                         }
@@ -163,15 +165,221 @@ fn load_colors(path: Option<&str>) -> Colors {
     colors
 }
 
-// --- App ---
+// --- Desktop entry parsing ---
+
+fn desktop_dirs() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap();
+    vec![
+        PathBuf::from(&home).join(".local/share/applications"),
+        PathBuf::from("/usr/local/share/applications"),
+        PathBuf::from("/usr/share/applications"),
+    ]
+}
+
+fn strip_field_codes(exec: &str) -> String {
+    let mut result = String::with_capacity(exec.len());
+    let mut chars = exec.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let Some(&next) = chars.peek() {
+                if "fFuUdDnNickvm".contains(next) {
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+    }
+    result.trim().to_string()
+}
+
+fn parse_desktop_file(path: &Path) -> Option<(String, String, String, String, bool)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut in_entry = false;
+    let mut name = None;
+    let mut exec = None;
+    let mut comment = String::new();
+    let mut icon = String::new();
+    let mut terminal = false;
+    let mut no_display = false;
+    let mut hidden = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            if in_entry { break; }
+            if line == "[Desktop Entry]" { in_entry = true; }
+            continue;
+        }
+        if !in_entry { continue; }
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim();
+            let val = val.trim();
+            match key {
+                "Name" => name = Some(val.to_string()),
+                "Exec" => exec = Some(strip_field_codes(val)),
+                "Comment" => comment = val.to_string(),
+                "Icon" => icon = val.to_string(),
+                "Terminal" => terminal = val.eq_ignore_ascii_case("true"),
+                "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
+                "Hidden" => hidden = val.eq_ignore_ascii_case("true"),
+                "Type" => { if val != "Application" { return None; } }
+                _ => {}
+            }
+        }
+    }
+    if no_display || hidden { return None; }
+    Some((name?, exec?, comment, icon, terminal))
+}
+
+// --- Icon resolution ---
+
+fn icon_cache_dir() -> PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".cache"));
+    base.join("thumbnails/grimoire")
+}
+
+fn find_icon_path(name: &str) -> Option<PathBuf> {
+    if name.starts_with('/') {
+        let p = PathBuf::from(name);
+        if p.exists() { return Some(p); }
+        return None;
+    }
+    let sizes = ["48x48", "64x64", "32x32", "128x128", "256x256"];
+    for size in &sizes {
+        let p = PathBuf::from(format!("/usr/share/icons/hicolor/{size}/apps/{name}.png"));
+        if p.exists() { return Some(p); }
+    }
+    let svg = PathBuf::from(format!("/usr/share/icons/hicolor/scalable/apps/{name}.svg"));
+    if svg.exists() { return Some(svg); }
+    for ext in ["png", "svg"] {
+        let p = PathBuf::from(format!("/usr/share/pixmaps/{name}.{ext}"));
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+fn load_svg(path: &Path, size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let data = std::fs::read(path).ok()?;
+    let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+    let ts = tree.size();
+    let sx = size as f32 / ts.width();
+    let sy = size as f32 / ts.height();
+    let scale = sx.min(sy);
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)?;
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Some((pixmap.take(), size, size))
+}
+
+fn load_icon(path: &Path, size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if path.extension().is_some_and(|e| e == "svg") {
+        return load_svg(path, size);
+    }
+    let img = image::open(path).ok()?;
+    let resized = img.resize(size, size, image::imageops::FilterType::Triangle);
+    let rgba = resized.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some((rgba.into_raw(), w, h))
+}
+
+fn icon_cache_key(name: &str, size: u32) -> String {
+    let mut h = DefaultHasher::new();
+    name.hash(&mut h);
+    size.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+fn resolve_icon(name: &str, size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if name.is_empty() { return None; }
+    let cd = icon_cache_dir();
+    let key = icon_cache_key(name, size);
+    let cached = cd.join(format!("{key}.png"));
+
+    if cached.exists() {
+        if let Ok(img) = image::open(&cached) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            return Some((rgba.into_raw(), w, h));
+        }
+    }
+
+    let path = find_icon_path(name)?;
+    let (data, w, h) = load_icon(&path, size)?;
+
+    // Cache as PNG (only for non-SVG sources or any resolved icon)
+    std::fs::create_dir_all(&cd).ok();
+    if let Some(img_buf) = image::RgbaImage::from_raw(w, h, data.clone()) {
+        img_buf.save(&cached).ok();
+    }
+
+    Some((data, w, h))
+}
+
+// --- Items ---
 
 struct Item {
-    path: PathBuf,
-    label: String,
-    thumb_data: Vec<u8>,
-    thumb_w: u32,
-    thumb_h: u32,
+    name: String,
+    exec: String,
+    comment: String,
+    icon_data: Option<Vec<u8>>,
+    icon_w: u32,
+    icon_h: u32,
+    terminal: bool,
 }
+
+fn load_desktop_entries(icon_size: u32) -> Vec<Item> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut items: Vec<Item> = Vec::new();
+
+    for dir in desktop_dirs() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "desktop") { continue; }
+            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+
+            if let Some((name, exec, comment, icon_name, terminal)) = parse_desktop_file(&path) {
+                let (icon_data, icon_w, icon_h) = match resolve_icon(&icon_name, icon_size) {
+                    Some((d, w, h)) => (Some(d), w, h),
+                    None => (None, 0, 0),
+                };
+                let item = Item { name, exec, comment, icon_data, icon_w, icon_h, terminal };
+
+                if let Some(&idx) = seen.get(&filename) {
+                    items[idx] = item; // local overrides system
+                } else {
+                    seen.insert(filename, items.len());
+                    items.push(item);
+                }
+            }
+        }
+    }
+    items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    items
+}
+
+fn load_stdin_items() -> Vec<Item> {
+    let stdin = std::io::stdin();
+    stdin.lock().lines().flatten().map(|line| {
+        Item {
+            name: line.clone(), exec: line, comment: String::new(),
+            icon_data: None, icon_w: 0, icon_h: 0, terminal: false,
+        }
+    }).collect()
+}
+
+// --- Mode ---
+
+#[derive(PartialEq)]
+enum Mode { Drun, Dmenu }
+
+// --- App ---
 
 struct App {
     registry_state: RegistryState,
@@ -186,62 +394,65 @@ struct App {
     width: u32,
     height: u32,
     exit: bool,
-    input: String,
     font_system: FontSystem,
     swash_cache: SwashCache,
     loop_handle: LoopHandle<'static, App>,
+    mode: Mode,
     items: Vec<Item>,
     filtered: Vec<usize>,
     selected: usize,
     scroll_offset: usize,
-    cols: usize,
+    input: String,
     colors: Colors,
     font_size: f32,
-    label_font_size: f32,
-    show_labels: bool,
+    comment_font_size: f32,
+    icon_size: u32,
+    terminal_cmd: String,
     font_family: String,
+    hover_index: Option<usize>,
+    cols: usize,
+    show_comments: bool,
+    search_comments: bool,
 }
 
-const PAD: f32 = 16.0;
-const CELL_PAD: f32 = 12.0;
-const BAR_H: u32 = 50;
+const BAR_H: f32 = 50.0;
+const PAD: f32 = 8.0;
+const ROW_PAD: f32 = 8.0;
 
 impl App {
+    fn row_height(&self) -> f32 { self.icon_size as f32 + ROW_PAD }
+    fn visible_rows(&self) -> usize { ((self.height as f32 - BAR_H) / self.row_height()).max(0.0) as usize }
+
     fn effective_cols(&self) -> usize {
         let n = self.filtered.len();
         if n == 0 { return self.cols; }
-        let sqrt = (n as f32).sqrt().ceil() as usize;
-        sqrt.min(self.cols).max(1)
+        n.min(self.cols).max(1)
     }
 
-    fn grid_metrics(&self) -> (f32, f32, u32, u32, f32, f32, usize) {
-        let grid_top = BAR_H as f32 + 12.0;
-        let cell_w = (self.width as f32 - PAD * 2.0) / self.cols as f32;
-        let thumb_w = (cell_w - CELL_PAD) as u32;
-        let thumb_h = (thumb_w as f32 * 0.67) as u32;
-        let label_h = if self.show_labels { 28.0f32 } else { 0.0 };
-        let cell_h = thumb_h as f32 + label_h + CELL_PAD;
-        let rows = ((self.height as f32 - grid_top) / cell_h).max(0.0) as usize;
-        let visible = rows * self.effective_cols();
-        (grid_top, cell_w, thumb_w, thumb_h, label_h, cell_h, visible)
-    }
+    fn col_width(&self) -> f32 { self.width as f32 / self.cols as f32 }
 
-    fn grid_offsets(&self) -> (f32, f32) {
-        let (grid_top, cell_w, _, _, _, cell_h, visible) = self.grid_metrics();
+    fn grid_x_offset(&self) -> f32 {
         let ecols = self.effective_cols();
-        let start = self.scroll_offset;
-        let on_screen = (start + visible).min(self.filtered.len()) - start;
-        let eff_cols = if on_screen == 0 { ecols } else { on_screen.min(ecols) };
-        let x_off = (self.width as f32 - eff_cols as f32 * cell_w) / 2.0;
-        let total_rows = if on_screen == 0 { 0 } else { (on_screen + ecols - 1) / ecols };
-        let avail_h = self.height as f32 - grid_top;
-        let grid_h = total_rows as f32 * cell_h;
-        let y_off = if grid_h < avail_h { (avail_h - grid_h) / 2.0 } else { 0.0 };
-        (x_off, y_off)
+        let col_w = self.col_width();
+        (self.width as f32 - ecols as f32 * col_w) / 2.0
+    }
+
+    fn item_at_pos(&self, x: f32, y: f32) -> Option<usize> {
+        if y < BAR_H { return None; }
+        let ecols = self.effective_cols();
+        let col_w = self.col_width();
+        let x_off = self.grid_x_offset();
+        if x < x_off { return None; }
+        let col = ((x - x_off) / col_w) as usize;
+        if col >= ecols { return None; }
+        let row = ((y - BAR_H) / self.row_height()) as usize;
+        let idx = self.scroll_offset + row * ecols + col;
+        if idx < self.filtered.len() { Some(idx) } else { None }
     }
 
     fn ensure_visible(&mut self) {
-        let (_, _, _, _, _, _, visible) = self.grid_metrics();
+        let ecols = self.effective_cols();
+        let visible = self.visible_rows() * ecols;
         if visible == 0 { return; }
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
@@ -256,11 +467,39 @@ impl App {
             (0..self.items.len()).collect()
         } else {
             (0..self.items.len())
-                .filter(|&i| fuzzy_match(&self.items[i].label, &self.input))
+                .filter(|&i| fuzzy_match(&self.items[i].name, &self.input)
+                    || (self.search_comments && fuzzy_match(&self.items[i].comment, &self.input)))
                 .collect()
         };
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    fn select_item(&mut self) {
+        if self.filtered.is_empty() { return; }
+        let item = &self.items[self.filtered[self.selected]];
+
+        if self.mode == Mode::Dmenu {
+            println!("{}", item.exec);
+            self.exit = true;
+            return;
+        }
+
+        // drun: fork+exec
+        let exec_cmd = if item.terminal {
+            format!("{} {}", self.terminal_cmd, item.exec)
+        } else {
+            item.exec.clone()
+        };
+        Command::new("sh")
+            .arg("-c")
+            .arg(&exec_cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+        self.exit = true;
     }
 
     fn handle_key(&mut self, event: &KeyEvent) {
@@ -268,21 +507,20 @@ impl App {
             self.exit = true;
             return;
         }
-        if event.keysym == Keysym::Return && !self.filtered.is_empty() {
-            println!("{}", self.items[self.filtered[self.selected]].path.display());
-            self.exit = true;
+        if event.keysym == Keysym::Return {
+            self.select_item();
             return;
         }
         let n = self.filtered.len();
-        let cols = self.effective_cols();
+        let ecols = self.effective_cols();
         let changed = match event.keysym {
             Keysym::BackSpace => {
                 if self.input.pop().is_some() { self.refilter(); true } else { false }
             }
             Keysym::Left if self.selected > 0 => { self.selected -= 1; true }
             Keysym::Right if self.selected + 1 < n => { self.selected += 1; true }
-            Keysym::Up if self.selected >= cols => { self.selected -= cols; true }
-            Keysym::Down if self.selected + cols < n => { self.selected += cols; true }
+            Keysym::Up if self.selected >= ecols => { self.selected -= ecols; true }
+            Keysym::Down if self.selected + ecols < n => { self.selected += ecols; true }
             _ => match event.utf8 {
                 Some(ref text) if !text.is_empty() && text.chars().all(|c| !c.is_control()) => {
                     self.input.push_str(text);
@@ -299,90 +537,134 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (grid_top, cell_w, thumb_w, thumb_h, label_h, cell_h, visible) = self.grid_metrics();
-        let (x_off, y_off) = self.grid_offsets();
-        let cols = self.effective_cols();
-        let c = &self.colors;
-        let bg = c.background;
-        let bar_bg = c.bar_bg;
-        let bar_border = c.bar_border;
-        let text_color = c.text;
-        let label_color = c.label;
-        let sel_color = c.selection;
+        let bg = self.colors.background;
+        let bg_alpha = self.colors.background_alpha;
+        let bar_bg = self.colors.bar_bg;
+        let bar_border = self.colors.bar_border;
+        let border = self.colors.border;
+        let text_color = self.colors.text;
+        let comment_color = self.colors.text_comment;
+        let placeholder_color = self.colors.text_placeholder;
+        let sel_color = self.colors.selection;
+        let sel_alpha = self.colors.selection_alpha;
+        let row_h = self.row_height();
+        let ecols = self.effective_cols();
+        let col_w = self.col_width();
+        let x_off = self.grid_x_offset();
+        let visible = self.visible_rows() * ecols;
+        let icon_sz = self.icon_size;
+        let has_icons = self.mode == Mode::Drun;
+        let icon_pad = if has_icons { PAD + icon_sz as f32 + PAD } else { PAD };
+        let font_size = self.font_size;
+        let comment_font_size = self.comment_font_size;
+        let show_comments = self.show_comments;
+        let width = self.width;
+        let height = self.height;
+        let start = self.scroll_offset;
+        let end = (start + visible).min(self.filtered.len());
+        let selected = self.selected;
+        let hover = self.hover_index;
+        let filtered: Vec<usize> = self.filtered[start..end].to_vec();
 
-        let stride = self.width as i32 * 4;
+        let stride = width as i32 * 4;
         let (wl_buf, canvas) = self.pool
-            .create_buffer(self.width as i32, self.height as i32, stride, wl_shm::Format::Argb8888)
+            .create_buffer(width as i32, height as i32, stride, wl_shm::Format::Argb8888)
             .unwrap();
 
-        let mut pixmap = Pixmap::new(self.width, self.height).unwrap();
-        pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], c.background_alpha));
+        let mut pixmap = Pixmap::new(width, height).unwrap();
+        pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], bg_alpha));
 
         let pw = pixmap.width();
         let ph = pixmap.height();
 
-        // Search bar
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, self.width, BAR_H, bar_bg);
+        // Search bar background
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, width, BAR_H as u32, bar_bg);
 
-        // Window outline
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, self.width, 2, bar_border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, self.height - 2, self.width, 2, bar_border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, 2, self.height, bar_border);
-        fill_rect(pixmap.data_mut(), pw, ph, self.width - 2, 0, 2, self.height, bar_border);
+        // Search bar bottom border
+        fill_rect(pixmap.data_mut(), pw, ph, 0, BAR_H as u32 - 2, width, 2, bar_border);
 
-        if !self.input.is_empty() {
-            let text_y = (BAR_H as f32 + self.font_size) / 2.0;
-            let text_w = measure_text(&mut self.font_system, &self.input, self.font_size, &self.font_family);
-            let text_x = (self.width as f32 - text_w) / 2.0;
+        // Window border
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, width, 2, border);
+        fill_rect(pixmap.data_mut(), pw, ph, 0, height - 2, width, 2, border);
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, 2, height, border);
+        fill_rect(pixmap.data_mut(), pw, ph, width - 2, 0, 2, height, border);
+
+        // Search text or placeholder
+        if self.input.is_empty() {
+            let placeholder = "Search...";
+            let tw = measure_text(&mut self.font_system, placeholder, font_size, &self.font_family);
+            let tx = (width as f32 - tw) / 2.0;
+            let ty = (BAR_H + font_size) / 2.0;
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                &self.input, text_x, text_y, self.font_size, self.width as f32, BAR_H as f32, text_color,
+                placeholder, tx, ty, font_size, width as f32, BAR_H, placeholder_color,
+                &self.font_family);
+        } else {
+            let tw = measure_text(&mut self.font_system, &self.input, font_size, &self.font_family);
+            let tx = (width as f32 - tw) / 2.0;
+            let ty = (BAR_H + font_size) / 2.0;
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                &self.input, tx, ty, font_size, width as f32, BAR_H, text_color,
                 &self.font_family);
         }
 
-        // Grid
-        let start = self.scroll_offset;
-        let end = (start + visible).min(self.filtered.len());
+        // Grid items
+        for (vi, &item_idx) in filtered.iter().enumerate() {
+            let i = start + vi;
+            let col = vi % ecols;
+            let row = vi / ecols;
+            let cell_x = x_off + col as f32 * col_w;
+            let cell_y = BAR_H + row as f32 * row_h;
+            let text_x = cell_x + icon_pad;
 
-        for i in start..end {
-            let vis_pos = (i - start) as u32;
-            let item_idx = self.filtered[i];
-            let col = vis_pos % cols as u32;
-            let row = vis_pos / cols as u32;
-            let cx = x_off + col as f32 * cell_w + CELL_PAD / 2.0;
-            let cy = grid_top + y_off + row as f32 * cell_h;
-
-            let tw = self.items[item_idx].thumb_w;
-            let th = self.items[item_idx].thumb_h;
-            let tx = cx + (thumb_w as f32 - tw as f32) / 2.0;
-            let ty = cy + (thumb_h as f32 - th as f32) / 2.0;
-            blit_rgba(pixmap.data_mut(), pw as i32, ph as i32,
-                tx as i32, ty as i32, tw as i32, th as i32, &self.items[item_idx].thumb_data);
-
-            if i == self.selected {
-                let bw: u32 = 2;
-                let bx = (tx as u32).saturating_sub(bw);
-                let by = (ty as u32).saturating_sub(bw);
-                let bwidth = tw + bw * 2;
-                let bheight = th + bw * 2;
-                // top
-                fill_rect(pixmap.data_mut(), pw, ph, bx, by, bwidth, bw, sel_color);
-                // bottom
-                fill_rect(pixmap.data_mut(), pw, ph, bx, by + bheight - bw, bwidth, bw, sel_color);
-                // left
-                fill_rect(pixmap.data_mut(), pw, ph, bx, by, bw, bheight, sel_color);
-                // right
-                fill_rect(pixmap.data_mut(), pw, ph, bx + bwidth - bw, by, bw, bheight, sel_color);
+            // Selection highlight
+            if i == selected {
+                fill_rect_alpha(pixmap.data_mut(), pw, ph,
+                    cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, sel_alpha);
+            } else if hover == Some(i) {
+                fill_rect_alpha(pixmap.data_mut(), pw, ph,
+                    cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, sel_alpha / 2);
             }
 
-            if self.show_labels {
-                render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                    &self.items[item_idx].label, cx, cy + thumb_h as f32 + 4.0,
-                    self.label_font_size, thumb_w as f32, label_h, label_color,
-                    &self.font_family);
+            // Icon
+            if has_icons {
+                if let Some(ref data) = self.items[item_idx].icon_data {
+                    let iw = self.items[item_idx].icon_w;
+                    let ih = self.items[item_idx].icon_h;
+                    let ix = cell_x as i32 + PAD as i32;
+                    let iy = cell_y as i32 + (row_h as i32 - ih as i32) / 2;
+                    blit_rgba(pixmap.data_mut(), pw as i32, ph as i32,
+                        ix, iy, iw as i32, ih as i32, data);
+                }
+            }
+
+            // Name
+            let name_y = cell_y + (row_h + font_size) / 2.0;
+            let max_name_w = if !show_comments || self.items[item_idx].comment.is_empty() {
+                (col_w - icon_pad).max(0.0)
+            } else {
+                (col_w - icon_pad) * 0.5
+            };
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                &self.items[item_idx].name, text_x, name_y, font_size,
+                max_name_w, row_h, text_color, &self.font_family);
+
+            // Comment
+            if show_comments && !self.items[item_idx].comment.is_empty() {
+                let name_w = measure_text(&mut self.font_system, &self.items[item_idx].name,
+                    font_size, &self.font_family);
+                let comment_x = text_x + name_w.min(max_name_w) + 12.0;
+                let comment_y = cell_y + (row_h + comment_font_size) / 2.0;
+                let comment_max_w = (cell_x + col_w - comment_x - PAD).max(0.0);
+                if comment_max_w > 20.0 {
+                    render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                        &self.items[item_idx].comment, comment_x, comment_y,
+                        comment_font_size, comment_max_w, row_h, comment_color,
+                        &self.font_family);
+                }
             }
         }
 
-        // Copy RGBA premul -> BGRA (ARGB8888 on LE)
+        // Copy RGBA -> BGRA
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
             dst[0] = src[2];
             dst[1] = src[1];
@@ -391,7 +673,7 @@ impl App {
         }
 
         wl_buf.attach_to(self.layer.wl_surface()).unwrap();
-        self.layer.wl_surface().damage_buffer(0, 0, self.width as i32, self.height as i32);
+        self.layer.wl_surface().damage_buffer(0, 0, width as i32, height as i32);
         self.layer.wl_surface().commit();
     }
 }
@@ -460,7 +742,7 @@ fn render_text(
 
     let pw = pixmap.width() as i32;
     let ph = pixmap.height() as i32;
-    for run in buf.layout_runs() {
+    if let Some(run) = buf.layout_runs().next() {
         for glyph in run.glyphs.iter() {
             let physical = glyph.physical((x, y), 1.0);
             if let Some(image) = swash_cache.get_image_uncached(font_system, physical.cache_key) {
@@ -506,10 +788,20 @@ fn blit_rgba(data: &mut [u8], pw: i32, ph: i32, x0: i32, y0: i32, w: i32, h: i32
             if px < 0 || px >= pw { continue; }
             let si = (gy * w + gx) as usize * 4;
             let di = (py * pw + px) as usize * 4;
-            data[di] = src[si];
-            data[di + 1] = src[si + 1];
-            data[di + 2] = src[si + 2];
-            data[di + 3] = src[si + 3];
+            let a = src[si + 3] as u32;
+            if a == 0 { continue; }
+            if a == 255 {
+                data[di] = src[si];
+                data[di + 1] = src[si + 1];
+                data[di + 2] = src[si + 2];
+                data[di + 3] = 255;
+            } else {
+                let inv = 255 - a;
+                data[di]     = ((src[si] as u32 * a + data[di] as u32 * inv) / 255) as u8;
+                data[di + 1] = ((src[si + 1] as u32 * a + data[di + 1] as u32 * inv) / 255) as u8;
+                data[di + 2] = ((src[si + 2] as u32 * a + data[di + 2] as u32 * inv) / 255) as u8;
+                data[di + 3] = ((a + data[di + 3] as u32 * inv / 255)) as u8;
+            }
         }
     }
 }
@@ -596,50 +888,28 @@ impl PointerHandler for App {
                     device.destroy();
                 }
                 PointerEventKind::Press { button: 0x110, .. } => {
-                    let (grid_top, cell_w, _, _, _, cell_h, _) = self.grid_metrics();
-                    let (x_off, y_off) = self.grid_offsets();
-                    let ecols = self.effective_cols();
-                    let (mx, my) = (event.position.0 as f32, event.position.1 as f32);
-                    if mx >= x_off && my > grid_top + y_off {
-                        let row = ((my - grid_top - y_off) / cell_h) as usize;
-                        let col = ((mx - x_off) / cell_w) as usize;
-                        if col < ecols {
-                            let idx = self.scroll_offset + row * ecols + col;
-                            if idx < self.filtered.len() {
-                                self.selected = idx;
-                                println!("{}", self.items[self.filtered[idx]].path.display());
-                                self.exit = true;
-                                return;
-                            }
-                        }
+                    if let Some(idx) = self.item_at_pos(event.position.0 as f32, event.position.1 as f32) {
+                        self.selected = idx;
+                        self.select_item();
+                        return;
                     }
                 }
                 PointerEventKind::Motion { .. } => {
-                    let (grid_top, cell_w, _, _, _, cell_h, _) = self.grid_metrics();
-                    let (x_off, y_off) = self.grid_offsets();
-                    let ecols = self.effective_cols();
-                    let (mx, my) = (event.position.0 as f32, event.position.1 as f32);
-                    if mx >= x_off && my > grid_top + y_off {
-                        let row = ((my - grid_top - y_off) / cell_h) as usize;
-                        let col = ((mx - x_off) / cell_w) as usize;
-                        if col < ecols {
-                            let idx = self.scroll_offset + row * ecols + col;
-                            if idx < self.filtered.len() && idx != self.selected {
-                                self.selected = idx;
-                                redraw = true;
-                            }
-                        }
+                    let new_hover = self.item_at_pos(event.position.0 as f32, event.position.1 as f32);
+                    if new_hover != self.hover_index {
+                        self.hover_index = new_hover;
+                        redraw = true;
                     }
                 }
                 PointerEventKind::Axis { ref vertical, .. } => {
-                    let (_, _, _, _, _, _, visible) = self.grid_metrics();
-                    let cols = self.effective_cols();
+                    let ecols = self.effective_cols();
+                    let visible = self.visible_rows() * ecols;
                     if vertical.absolute > 0.0 && self.scroll_offset + visible < self.filtered.len() {
-                        self.scroll_offset = (self.scroll_offset + cols)
+                        self.scroll_offset = (self.scroll_offset + ecols)
                             .min(self.filtered.len().saturating_sub(visible));
                         redraw = true;
                     } else if vertical.absolute < 0.0 && self.scroll_offset > 0 {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(cols);
+                        self.scroll_offset = self.scroll_offset.saturating_sub(ecols);
                         redraw = true;
                     }
                 }
@@ -679,72 +949,6 @@ delegate_shm!(App);
 delegate_layer!(App);
 delegate_registry!(App);
 
-// --- Thumbnail loading ---
-
-fn cache_dir() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".cache"));
-    base.join("thumbnails/wallrun")
-}
-
-fn cache_key(path: &Path, thumb_w: u32, thumb_h: u32) -> Option<String> {
-    let mtime = path.metadata().ok()?.modified().ok()?;
-    let canonical = path.canonicalize().ok()?;
-    let mut h = DefaultHasher::new();
-    canonical.hash(&mut h);
-    mtime.hash(&mut h);
-    thumb_w.hash(&mut h);
-    thumb_h.hash(&mut h);
-    Some(format!("{:016x}", h.finish()))
-}
-
-fn load_thumbnail(path: &Path, cache_dir: &Path, thumb_w: u32, thumb_h: u32) -> Option<(Vec<u8>, u32, u32)> {
-    let key = cache_key(path, thumb_w, thumb_h)?;
-    let cached = cache_dir.join(format!("{key}.png"));
-
-    if cached.exists() {
-        if let Ok(img) = image::open(&cached) {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            return Some((rgba.into_raw(), w, h));
-        }
-    }
-
-    let img = image::open(path).ok()?;
-    let thumb = img.resize(thumb_w, thumb_h, image::imageops::FilterType::Triangle);
-    let rgba = thumb.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    rgba.save(&cached).ok();
-    Some((rgba.into_raw(), w, h))
-}
-
-fn load_items(dir: &str, exts: &[String], thumb_w: u32, thumb_h: u32) -> Vec<Item> {
-    let cd = cache_dir();
-    std::fs::create_dir_all(&cd).ok();
-
-    let mut items = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => { eprintln!("wallrun: cannot read {dir}: {e}"); return items; }
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let ext = match path.extension() {
-            Some(e) => e.to_string_lossy().to_lowercase(),
-            None => continue,
-        };
-        if !exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)) { continue; }
-        let label = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-        match load_thumbnail(&path, &cd, thumb_w, thumb_h) {
-            Some((data, tw, th)) => items.push(Item { path, label, thumb_data: data, thumb_w: tw, thumb_h: th }),
-            None => eprintln!("wallrun: skip {}", path.display()),
-        }
-    }
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items
-}
-
 // --- Main ---
 
 fn main() {
@@ -752,45 +956,23 @@ fn main() {
     let colors = load_colors(cfg.color_file.as_deref());
 
     let args: Vec<String> = std::env::args().collect();
-    let mut dir: Option<String> = None;
-    let mut exts: Vec<String> = ["png", "jpg", "jpeg", "webp"].iter().map(|s| s.to_string()).collect();
+    let mut mode = Mode::Drun;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--dir" if i + 1 < args.len() => { dir = Some(args[i + 1].clone()); i += 2; }
-            "--ext" if i + 1 < args.len() => { exts = args[i + 1].split(',').map(String::from).collect(); i += 2; }
-            _ => { eprintln!("wallrun: unknown arg: {}", args[i]); i += 1; }
+            "--dmenu" => { mode = Mode::Dmenu; i += 1; }
+            "--drun" => { mode = Mode::Drun; i += 1; }
+            _ => { eprintln!("grimoire: unknown arg: {}", args[i]); i += 1; }
         }
     }
 
-    let cols = cfg.columns;
-
-    // Resolve width (fit = auto-size based on column count)
-    let width = match cfg.window_width {
-        Dimension::Fixed(w) => w,
-        Dimension::Auto(_) => (256.0 * cols as f32 + PAD * 2.0) as u32,
+    let items = match mode {
+        Mode::Drun => load_desktop_entries(cfg.icon_size),
+        Mode::Dmenu => load_stdin_items(),
     };
 
-    let cell_w = (width as f32 - PAD * 2.0) / cols as f32;
-    let thumb_w = (cell_w - CELL_PAD) as u32;
-    let thumb_h = (thumb_w as f32 * 0.67) as u32;
-
-    let items = match dir {
-        Some(ref d) => load_items(d, &exts, thumb_w, thumb_h),
-        None => Vec::new(),
-    };
-
-    // Resolve height (fit = auto-size to show all items)
-    let height = match cfg.window_height {
-        Dimension::Fixed(h) => h,
-        Dimension::Auto(_) => {
-            let rows = if items.is_empty() { 1 } else { (items.len() + cols - 1) / cols };
-            let grid_top = BAR_H as f32 + 12.0;
-            let label_h = if cfg.show_labels { 28.0 } else { 0.0 };
-            let cell_h = thumb_h as f32 + label_h + CELL_PAD;
-            (grid_top + rows as f32 * cell_h + CELL_PAD) as u32
-        }
-    };
+    let width = cfg.window_width;
+    let height = cfg.window_height;
 
     let conn = Connection::connect_to_env().unwrap();
     let (globals, event_queue) = registry_queue_init::<App>(&conn).unwrap();
@@ -806,15 +988,17 @@ fn main() {
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("wallrun"), None);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("grimoire"), None);
     layer.set_size(width, height);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     layer.wl_surface().commit();
 
     let pool = SlotPool::new((width * height * 4) as usize, &shm).unwrap();
 
+    let filtered: Vec<usize> = (0..items.len()).collect();
+
     let font_data = std::fs::read(expand_path(&cfg.font)).expect("failed to read font file");
-    let mut db = cosmic_text::fontdb::Database::new();
+    let mut db = fontdb::Database::new();
     db.load_font_data(font_data);
     let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
     let font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
@@ -832,20 +1016,25 @@ fn main() {
         width,
         height,
         exit: false,
-        input: String::new(),
         font_system,
         swash_cache: SwashCache::new(),
         loop_handle: event_loop.handle(),
-        filtered: (0..items.len()).collect(),
+        mode,
+        filtered,
         items,
         selected: 0,
         scroll_offset: 0,
-        cols,
+        input: String::new(),
         colors,
         font_size: cfg.font_size,
-        label_font_size: cfg.label_font_size,
-        show_labels: cfg.show_labels,
+        comment_font_size: cfg.comment_font_size,
+        icon_size: cfg.icon_size,
+        terminal_cmd: cfg.terminal,
         font_family,
+        hover_index: None,
+        cols: cfg.columns.max(1),
+        show_comments: cfg.show_comments,
+        search_comments: cfg.search_comments,
     };
 
     loop {

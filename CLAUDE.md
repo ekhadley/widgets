@@ -16,7 +16,7 @@ All widgets follow the same architecture:
 
 - **Rust + smithay-client-toolkit 0.20** for Wayland layer-shell surfaces, pointer/keyboard handling, SHM buffers, calloop event loop
 - **tiny-skia** for CPU rendering into the SHM buffer (RGBA pixmap, copied to BGRA for Wayland)
-- **cosmic-text** for text shaping and glyph rendering
+- **cosmic-text** for text shaping and glyph rendering — fonts are loaded by file path (not system font scanning) via `FontSystem::new_with_locale_and_db()` with a manually built `fontdb::Database`
 - **serde + toml** for config files
 - **walrs** for colorscheme integration — each widget has a template in `~/.config/walrs/templates/` that generates a `key=value` color file in `~/.cache/wal/`
 - Single `src/main.rs` per widget, typically 500-900 lines
@@ -36,6 +36,10 @@ All widgets follow the same architecture:
 - `ProvidesRegistryState` needs `registry_handlers!` macro
 
 ## cosmic-text rendering
+
+Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (panel also has `icon_font` for Font Awesome). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
+
+Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `Source::Binary` (i.e. via `load_font_data(Vec<u8>)`, not `load_font_file(path)`).
 
 `render_text()` wraps cosmic-text buffer creation and glyph blitting. Key detail: the `(x, y)` offset passed to `glyph.physical()` must include `run.line_y` (which contains the font's ascent offset). Without it, all text renders ~20-25px too high. The correct call is `glyph.physical((x, y + run.line_y), 1.0)`.
 
@@ -71,6 +75,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 columns = 3
 window_width = 800        # or "fit" (auto-size from column count)
 window_height = 600       # or "fit" (auto-size to show all items)
+font = "/usr/share/fonts/TTF/SomeFont-Regular.ttf"
 font_size = 20.0
 label_font_size = 14.0
 show_labels = true
@@ -111,7 +116,8 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 **Config** — `~/.config/widgets/panel.toml` (all optional):
 ```toml
 color_file = "~/.cache/wal/colors-panel.toml"
-font_family = "Google Sans Code"
+font = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"
+icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
 font_size = 30.0
 timer1_duration = 3600
 timer2_duration = 900
@@ -121,12 +127,54 @@ bt_device_2 = "EC:81:93:AC:8B:60"
 
 **Color keys:** `background`, `background_opacity`, `border`, `divider`, `dot1`–`dot6`, `sun`, `clock`, `ui`
 
+### grimoire
+
+App launcher and dmenu replacement — scans .desktop files, displays apps with icons in a filterable list, or reads lines from stdin in dmenu mode.
+
+**Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text, image, resvg, serde + toml
+
+Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
+
+**Features:**
+- Two modes: `--drun` (default, app launcher) and `--dmenu` (stdin lines, prints selection to stdout)
+- Layer-shell overlay with configurable dimensions
+- Fuzzy search — typed characters filter items by name and comment
+- Configurable multi-column grid layout (items flow left-to-right, top-to-bottom, centered when fewer items than columns)
+- Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete)
+- Mouse input (click to select, hover to highlight, scroll wheel)
+- Icon support: PNG and SVG via hicolor theme + /usr/share/pixmaps, cached to `~/.cache/thumbnails/grimoire/`
+- .desktop file parsing with field code stripping, Terminal=true support, NoDisplay/Hidden filtering
+- Comment text displayed next to app name in dimmer color
+
+**Architecture:**
+- `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
+- `App::handle_key()` handles all keyboard input (navigation, typing, selection)
+- `App::select_item()` — drun: fork+exec via `sh -c`; dmenu: println to stdout
+- `PointerHandler` handles click-to-select, hover-to-highlight, and scroll
+- `load_desktop_entries()` scans ~/.local/share/applications, /usr/local/share/applications, /usr/share/applications
+- `resolve_icon()` finds and caches icons from hicolor theme dirs
+
+**Config** — `~/.config/widgets/grimoire.toml` (all optional):
+```toml
+color_file = "~/.cache/wal/colors-grimoire"
+font = "/usr/share/fonts/TTF/SomeFont-Regular.ttf"
+font_size = 18.0
+comment_font_size = 14.0
+icon_size = 32
+window_width = 600
+window_height = 400
+terminal = "ghostty -e"
+columns = 1
+show_comments = true
+```
+
+**Color keys:** `background`, `background_opacity`, `border`, `bar_bg`, `bar_border`, `text`, `text_comment`, `text_placeholder`, `selection`, `selection_opacity`
+
 ## Ideas
 
 - **sysinfo** — neofetch/fastfetch-style system info overlay (host, kernel, CPU, RAM, GPU, uptime, packages, etc). Static snapshot on launch, not live monitoring.
 - **workspaces** — thin edge-anchored bar showing Hyprland workspace state via IPC socket. Active/occupied/empty as colored dots or rectangles.
 - **panel: timer alert** — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
-- **launcher** — rofi replacement. App launcher with fuzzy search, keyboard nav. Same list-picker pattern as wallrun. Could support modes for different sources (desktop entries, custom lists).
 - **cliphistory** — clipboard history picker. Reads from cliphist (or similar wl-clipboard history), presents as a filterable list overlay. Same fuzzy-search-and-pick pattern.
 
 ## Todo
@@ -134,5 +182,8 @@ bt_device_2 = "EC:81:93:AC:8B:60"
 ### panel
 - Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
 - pausing a timer that is negative sets it to 0:00
+
+### grimoire
+- Frequency+recency sorting — track launch counts and timestamps, sort items by combined score so frequently/recently used apps appear first. (Can copy from rofi cache?)
 
 ### wallrun

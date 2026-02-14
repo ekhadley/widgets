@@ -1,0 +1,15 @@
+[package]
+name = "grimoire"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cosmic-text = "0.17.1"
+fontdb = "0.23"
+image = "0.25.9"
+resvg = "0.45"
+serde = { version = "1", features = ["derive"] }
+smithay-client-toolkit = { version = "0.20.0", features = ["calloop"] }
+tiny-skia = "0.12.0"
+toml = "0.8"
+wayland-client = "0.31.12"
