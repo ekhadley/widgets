@@ -7,7 +7,7 @@
 # Examples:
 #   ./bench.sh grimoire --drun
 #   ./bench.sh wallrun --dir ~/walls --ext png
-#   ./bench.sh panel
+#   ./bench.sh stele
 
 set -euo pipefail
 

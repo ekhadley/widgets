@@ -329,19 +329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "panel"
-version = "0.1.0"
-dependencies = [
- "cosmic-text",
- "libc",
- "serde",
- "smithay-client-toolkit",
- "tiny-skia",
- "toml",
- "wayland-client",
-]
-
-[[package]]
 name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,6 +579,19 @@ name = "smol_str"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f7a918bd2a9951d18ee6e48f076843e8e73a9a5d22cf05bcd4b7a81bdd04e17"
+
+[[package]]
+name = "stele"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "libc",
+ "serde",
+ "smithay-client-toolkit",
+ "tiny-skia",
+ "toml",
+ "wayland-client",
+]
 
 [[package]]
 name = "strict-num"

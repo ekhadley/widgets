@@ -37,7 +37,7 @@ All widgets follow the same architecture:
 
 ## cosmic-text rendering
 
-Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (panel also has `icon_font` for Font Awesome). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
+Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (stele also has `icon_font` for Font Awesome). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
 
 Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `Source::Binary` (i.e. via `load_font_data(Vec<u8>)`, not `load_font_file(path)`).
 
@@ -84,20 +84,20 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 **Color keys:** `background`, `background_opacity`, `bar_bg`, `bar_border`, `text`, `text_placeholder`, `label`, `selection`, `selection_opacity`
 
-### panel
+### stele
 
-Floating overlay panel for Hyprland — clock, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
+Floating overlay for Hyprland — clock, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
-**Build:** `make install` installs `panel` and `panel_toggle` to `~/.local/bin/`. `panel_toggle` launches panel or kills existing instance.
+**Build:** `make install` installs `stele` and `stele_toggle` to `~/.local/bin/`. `stele_toggle` launches stele or kills existing instance.
 
 Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`).
 
 **Features:**
 - Clock (HH:MM:SS + "Month Day"), updates every second via calloop timer
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
-- Timer state persists to `~/.local/state/widgets/panel/timers.toml` (survives panel close/reopen)
+- Timer state persists to `~/.local/state/widgets/stele/timers.toml` (survives close/reopen)
 - Volume bar (0-200%) via `wpctl`, scroll to adjust
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
 - Day/night toggle via `dim_toggle.sh`
@@ -109,13 +109,13 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
 - `App::handle_click()` / `App::handle_scroll()` / `App::handle_right_click()` / `App::hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
 - Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for all 7 tiles: toggle, dots, clock, timer1, timer2, volume, audio
-- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`. Panel is 320×202.
+- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`. Stele is 320×202.
 - Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
 - calloop `Timer` fires every 1s for clock/timer redraws
 
-**Config** — `~/.config/widgets/panel.toml` (all optional):
+**Config** — `~/.config/widgets/stele.toml` (all optional):
 ```toml
-color_file = "~/.cache/wal/colors-panel.toml"
+color_file = "~/.cache/wal/colors-stele.toml"
 font = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"
 icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
 font_size = 30.0
@@ -174,7 +174,7 @@ show_comments = true
 
 - **sysinfo** — neofetch/fastfetch-style system info overlay (host, kernel, CPU, RAM, GPU, uptime, packages, etc). Static snapshot on launch, not live monitoring.
 - **workspaces** — thin edge-anchored bar showing Hyprland workspace state via IPC socket. Active/occupied/empty as colored dots or rectangles.
-- **panel: timer alert** — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
+- **stele: timer alert** — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - **cliphistory** — clipboard history picker. Reads from cliphist (or similar wl-clipboard history), presents as a filterable list overlay. Same fuzzy-search-and-pick pattern.
 
 ## Future applications
@@ -187,7 +187,7 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 
 ## Todo
 
-### panel
+### stele
 - Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
 - pausing a timer that is negative sets it to 0:00
 

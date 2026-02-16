@@ -50,7 +50,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            color_file: Some("~/.cache/wal/colors-panel.toml".into()),
+            color_file: Some("~/.cache/wal/colors-stele.toml".into()),
             font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
             font_size: 30.0,
@@ -63,11 +63,11 @@ impl Default for Config {
 }
 
 fn load_config() -> Config {
-    let path = config_dir().join("panel.toml");
+    let path = config_dir().join("stele.toml");
     match std::fs::read_to_string(&path) {
         Ok(s) => match toml::from_str(&s) {
             Ok(cfg) => cfg,
-            Err(e) => { eprintln!("panel: failed to parse {}: {e}", path.display()); Config::default() }
+            Err(e) => { eprintln!("stele: failed to parse {}: {e}", path.display()); Config::default() }
         }
         Err(_) => Config::default(),
     }
@@ -180,7 +180,7 @@ fn state_dir() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    base.join("widgets/panel")
+    base.join("widgets/stele")
 }
 
 fn load_timer_state(cfg: &Config) -> TimerState {
@@ -980,7 +980,7 @@ fn main() {
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("panel"), None);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("stele"), None);
     layer.set_size(WIDTH, HEIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.wl_surface().commit();
