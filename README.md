@@ -4,10 +4,10 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 
 ## Widgets
 
-### stele
+### raven
 Floating status overlay — clock, pomodoro timers, volume control, theme toggle.
 
-![stele](screenshots/stele.png)
+![raven](screenshots/raven.png)
 
 ### wallrun
 Image picker overlay — thumbnail grid, fuzzy search, keyboard + mouse nav.

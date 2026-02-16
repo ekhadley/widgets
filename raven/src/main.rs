@@ -50,7 +50,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            color_file: Some("~/.cache/wal/colors-stele.toml".into()),
+            color_file: Some("~/.cache/wal/colors-raven.toml".into()),
             font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
             font_size: 30.0,
@@ -63,11 +63,11 @@ impl Default for Config {
 }
 
 fn load_config() -> Config {
-    let path = config_dir().join("stele.toml");
+    let path = config_dir().join("raven.toml");
     match std::fs::read_to_string(&path) {
         Ok(s) => match toml::from_str(&s) {
             Ok(cfg) => cfg,
-            Err(e) => { eprintln!("stele: failed to parse {}: {e}", path.display()); Config::default() }
+            Err(e) => { eprintln!("raven: failed to parse {}: {e}", path.display()); Config::default() }
         }
         Err(_) => Config::default(),
     }
@@ -170,33 +170,40 @@ fn load_colors(path: Option<&str>) -> Colors {
 
 #[derive(Serialize, Deserialize, Default)]
 struct TimerState {
-    timer1_duration: u64,
+    timer1_duration: i64,
     timer1_started: u64,
-    timer2_duration: u64,
+    #[serde(default)]
+    timer1_base: i64,
+    timer2_duration: i64,
     timer2_started: u64,
+    #[serde(default)]
+    timer2_base: i64,
 }
 
 fn state_dir() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    base.join("widgets/stele")
+    base.join("widgets/raven")
 }
 
 fn load_timer_state(cfg: &Config) -> TimerState {
     let path = state_dir().join("timers.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(s) => toml::from_str(&s).unwrap_or_else(|_| TimerState {
-            timer1_duration: cfg.timer1_duration,
-            timer2_duration: cfg.timer2_duration,
-            ..Default::default()
-        }),
-        Err(_) => TimerState {
-            timer1_duration: cfg.timer1_duration,
-            timer2_duration: cfg.timer2_duration,
-            ..Default::default()
-        },
-    }
+    let fallback = || TimerState {
+        timer1_duration: cfg.timer1_duration as i64,
+        timer1_base: cfg.timer1_duration as i64,
+        timer2_duration: cfg.timer2_duration as i64,
+        timer2_base: cfg.timer2_duration as i64,
+        ..Default::default()
+    };
+    let mut ts = match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str(&s).unwrap_or_else(|_| fallback()),
+        Err(_) => fallback(),
+    };
+    // Backward compat: base defaults to config duration when not in state file
+    if ts.timer1_base == 0 { ts.timer1_base = cfg.timer1_duration as i64; }
+    if ts.timer2_base == 0 { ts.timer2_base = cfg.timer2_duration as i64; }
+    ts
 }
 
 fn save_timer_state(state: &TimerState) {
@@ -210,9 +217,9 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-fn timer_remaining(duration: u64, started: u64) -> i64 {
-    if started == 0 { return duration as i64; }
-    duration as i64 - (now_unix() as i64 - started as i64)
+fn timer_remaining(duration: i64, started: u64) -> i64 {
+    if started == 0 { return duration; }
+    duration - (now_unix() as i64 - started as i64)
 }
 
 fn format_timer(secs: i64) -> String {
@@ -276,7 +283,7 @@ const LEFT_W: u32 = 42;
 const RIGHT_W: u32 = 42;
 const TOGGLE_H: u32 = 38;  // left column split
 const CLOCK_H: u32 = 145;  // center column split
-const AUDIO_H: u32 = 34;   // right column split (from bottom)
+// AUDIO_H removed — audio tile now aligns with timer row
 
 // Font/text sizes
 const ICON_SIZE: f32 = 25.0;
@@ -338,15 +345,14 @@ fn layout(w: u32, h: u32) -> Layout {
     let timer_y = OUTER + CLOCK_H + INNER;
     let timer_h = interior_h - CLOCK_H - INNER;
     let timer_w = (center_w - INNER) / 2;
-    let audio_y = h - OUTER - AUDIO_H;
     Layout {
         toggle: Rect { x: OUTER, y: OUTER, w: LEFT_W, h: TOGGLE_H },
         dots: Rect { x: OUTER, y: OUTER + TOGGLE_H + INNER, w: LEFT_W, h: interior_h - TOGGLE_H - INNER },
         clock: Rect { x: center_x, y: OUTER, w: center_w, h: CLOCK_H },
         timer1: Rect { x: center_x, y: timer_y, w: timer_w, h: timer_h },
         timer2: Rect { x: center_x + timer_w + INNER, y: timer_y, w: center_w - timer_w - INNER, h: timer_h },
-        volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: audio_y - OUTER },
-        audio: Rect { x: right_x, y: audio_y, w: RIGHT_W, h: AUDIO_H },
+        volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: CLOCK_H },
+        audio: Rect { x: right_x, y: timer_y, w: RIGHT_W, h: timer_h },
     }
 }
 
@@ -385,9 +391,9 @@ struct App {
     font_family: String,
     icon_family: String,
     // Timer state
-    timer1_duration: u64,
+    timer1_duration: i64,
     timer1_started: u64,
-    timer2_duration: u64,
+    timer2_duration: i64,
     timer2_started: u64,
     // Audio
     volume: f32,
@@ -399,9 +405,9 @@ struct App {
     is_dim: bool,
     // Hover
     hover: HoverTile,
-    // Default durations for reset
-    timer1_default: u64,
-    timer2_default: u64,
+    // Base durations for reset (scroll-adjusted)
+    timer1_base: i64,
+    timer2_base: i64,
     // Volume drag
     dragging_volume: bool,
     volume_set_at: u64,
@@ -412,8 +418,10 @@ impl App {
         TimerState {
             timer1_duration: self.timer1_duration,
             timer1_started: self.timer1_started,
+            timer1_base: self.timer1_base,
             timer2_duration: self.timer2_duration,
             timer2_started: self.timer2_started,
+            timer2_base: self.timer2_base,
         }
     }
 
@@ -624,7 +632,7 @@ impl App {
         if lay.timer1.contains(mx, my) {
             if self.timer1_started > 0 {
                 let rem = timer_remaining(self.timer1_duration, self.timer1_started);
-                self.timer1_duration = rem.max(0) as u64;
+                self.timer1_duration = rem;
                 self.timer1_started = 0;
             } else {
                 self.timer1_started = now_unix();
@@ -637,7 +645,7 @@ impl App {
         if lay.timer2.contains(mx, my) {
             if self.timer2_started > 0 {
                 let rem = timer_remaining(self.timer2_duration, self.timer2_started);
-                self.timer2_duration = rem.max(0) as u64;
+                self.timer2_duration = rem;
                 self.timer2_started = 0;
             } else {
                 self.timer2_started = now_unix();
@@ -670,7 +678,8 @@ impl App {
 
         if lay.timer1.contains(mx, my) {
             let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
-            self.timer1_duration = (self.timer1_duration as i64 + delta).max(TIMER_SCROLL_STEP) as u64;
+            self.timer1_duration = (self.timer1_duration + delta).max(TIMER_SCROLL_STEP);
+            self.timer1_base = self.timer1_duration;
             save_timer_state(&self.timer_state());
             self.draw();
             return;
@@ -678,7 +687,8 @@ impl App {
 
         if lay.timer2.contains(mx, my) {
             let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
-            self.timer2_duration = (self.timer2_duration as i64 + delta).max(TIMER_SCROLL_STEP) as u64;
+            self.timer2_duration = (self.timer2_duration + delta).max(TIMER_SCROLL_STEP);
+            self.timer2_base = self.timer2_duration;
             save_timer_state(&self.timer_state());
             self.draw();
         }
@@ -689,7 +699,7 @@ impl App {
         let lay = layout(self.width, self.height);
 
         if lay.timer1.contains(mx, my) {
-            self.timer1_duration = self.timer1_default;
+            self.timer1_duration = self.timer1_base;
             self.timer1_started = 0;
             save_timer_state(&self.timer_state());
             self.draw();
@@ -697,7 +707,7 @@ impl App {
         }
 
         if lay.timer2.contains(mx, my) {
-            self.timer2_duration = self.timer2_default;
+            self.timer2_duration = self.timer2_base;
             self.timer2_started = 0;
             save_timer_state(&self.timer_state());
             self.draw();
@@ -980,7 +990,7 @@ fn main() {
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("stele"), None);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("raven"), None);
     layer.set_size(WIDTH, HEIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.wl_surface().commit();
@@ -1025,8 +1035,8 @@ fn main() {
         bt_device_2: cfg.bt_device_2,
         is_dim: false,
         hover: HoverTile::None,
-        timer1_default: cfg.timer1_duration,
-        timer2_default: cfg.timer2_duration,
+        timer1_base: ts.timer1_base,
+        timer2_base: ts.timer2_base,
         dragging_volume: false,
         volume_set_at: 0,
     };
