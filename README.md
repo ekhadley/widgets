@@ -5,7 +5,7 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 ## Widgets
 
 ### raven
-Floating status overlay — clock, pomodoro timers, volume control, theme toggle.
+Floating status overlay — clock, weather, pomodoro timers, volume control, theme toggle.
 
 ![raven](screenshots/raven.png)
 
@@ -15,7 +15,7 @@ Image picker overlay — thumbnail grid, fuzzy search, keyboard + mouse nav.
 ![wallrun](screenshots/wallrun.png)
 
 ### grimoire
-App launcher / dmenu replacement — filterable list with icons, fuzzy search.
+App launcher / dmenu replacement — filterable list with icons, fuzzy search, frecency sorting.
 
 ![grimoire](screenshots/grimoire.png)
 
@@ -28,10 +28,11 @@ App launcher / dmenu replacement — filterable list with icons, fuzzy search.
 
 ## Build
 
-Each widget is its own Cargo project. From a widget directory:
+Cargo workspace with a unified Makefile:
 
 ```
-make install   # builds release and copies to ~/.local/bin/
+make install          # build + install all widgets to ~/.local/bin/
+make install W=raven  # build + install just one
 ```
 
 ## Config

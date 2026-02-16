@@ -8,7 +8,16 @@ Coding agents have made it practical to write and maintain bespoke native widget
 
 ## Workflow
 
-After making changes to any widget, run `make install` in that widget's directory to build and install the binary.
+The project is a Cargo workspace. A single top-level Makefile builds and installs all widgets:
+
+```
+make install          # build + install all widgets
+make install W=raven  # build + install just raven
+```
+
+Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates `raven_toggle` (a shell script that toggles raven on/off via `pkill -x raven || raven &`).
+
+`bench.sh` measures startup latency (time until process enters epoll_wait sleep state) over 1000 runs. Usage: `./bench.sh <widget> [args...]`.
 
 ## Shared patterns
 
@@ -19,8 +28,8 @@ All widgets follow the same architecture:
 - **cosmic-text** for text shaping and glyph rendering — fonts are loaded by file path (not system font scanning) via `FontSystem::new_with_locale_and_db()` with a manually built `fontdb::Database`
 - **serde + toml** for config files
 - **walrs** for colorscheme integration — each widget has a template in `~/.config/walrs/templates/` that generates a `key=value` color file in `~/.cache/wal/`
-- Single `src/main.rs` per widget, typically 500-900 lines
-- `sudo make install` puts binaries in `/usr/bin/`
+- Single `src/main.rs` per widget, typically 800-1400 lines
+- `make install` puts binaries in `~/.local/bin/`
 - Config files go in `~/.config/widgets/<name>.toml`
 - State files go in `~/.local/state/widgets/<name>/` (one file per widget)
 
@@ -92,7 +101,7 @@ Floating overlay for Hyprland — clock, weather, pomodoro timers, volume contro
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
-**Build:** `make install` installs `raven` and `raven_toggle` to `~/.local/bin/`. `raven_toggle` launches raven or kills existing instance.
+**Build:** `make install W=raven` installs `raven` and `raven_toggle` to `~/.local/bin/`. `raven_toggle` launches raven or kills existing instance.
 
 Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`).
 
@@ -152,6 +161,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 - Icon support: PNG and SVG via hicolor theme + /usr/share/pixmaps, cached to `~/.cache/thumbnails/grimoire/`
 - .desktop file parsing with field code stripping, Terminal=true support, NoDisplay/Hidden filtering
 - Comment text displayed next to app name in dimmer color
+- Frecency sorting — tracks launch counts and timestamps in `~/.local/state/widgets/grimoire.toml`, scores by `count / (1 + hours_since_last / 72)`, falls back to alphabetical
 
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
@@ -173,6 +183,7 @@ window_height = 400
 terminal = "ghostty -e"
 columns = 1
 show_comments = true
+search_comments = false
 ```
 
 **Color keys:** `background`, `background_opacity`, `border`, `bar_bg`, `bar_border`, `text`, `text_comment`, `text_placeholder`, `selection`, `selection_opacity`
@@ -181,7 +192,6 @@ show_comments = true
 
 - **sysinfo** — neofetch/fastfetch-style system info overlay (host, kernel, CPU, RAM, GPU, uptime, packages, etc). Static snapshot on launch, not live monitoring.
 - **workspaces** — thin edge-anchored bar showing Hyprland workspace state via IPC socket. Active/occupied/empty as colored dots or rectangles.
-- **raven: timer alert** — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - **cliphistory** — clipboard history picker. Reads from cliphist (or similar wl-clipboard history), presents as a filterable list overlay. Same fuzzy-search-and-pick pattern.
 
 ## Future applications
@@ -195,12 +205,9 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 ## Todo
 
 ### raven
-- Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
 - pausing a timer that is negative sets it to 0:00
+- Timer alert — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - Network tile — wifi SSID + signal strength or ethernet indicator
 - Notification toggle — click to enable/disable `makoctl` (or similar) do-not-disturb mode
-
-### grimoire
-- Frequency+recency sorting — track launch counts and timestamps, sort items by combined score so frequently/recently used apps appear first. (Can copy from rofi cache?)
 
 ### wallrun
