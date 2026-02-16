@@ -1,5 +1,5 @@
-PREFIX ?= $(HOME)/.local
+PREFIX ?= /usr
 
 install:
-	cargo build --release
-	install -Dm755 target/release/wallrun $(PREFIX)/bin/wallrun
+	cargo build --release -p wallrun
+	install -Dm755 ../target/release/wallrun $(PREFIX)/bin/wallrun

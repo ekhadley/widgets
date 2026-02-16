@@ -20,7 +20,7 @@ All widgets follow the same architecture:
 - **serde + toml** for config files
 - **walrs** for colorscheme integration — each widget has a template in `~/.config/walrs/templates/` that generates a `key=value` color file in `~/.cache/wal/`
 - Single `src/main.rs` per widget, typically 500-900 lines
-- `make install` puts binaries in `~/.local/bin/`
+- `sudo make install` puts binaries in `/usr/bin/`
 - Config files go in `~/.config/widgets/<name>.toml`
 - State files go in `~/.local/state/widgets/<name>/` (one file per widget)
 
