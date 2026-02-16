@@ -540,9 +540,9 @@ impl App {
 
         let fa = &self.icon_family;
 
-        // --- Toggle tile (top-left) ---
-        let icon_char = if self.is_dim { "\u{f186}" } else { "\u{f185}" }; // moon / sun (outline)
-        let mut icon_color = if self.is_dim { c.clock } else { c.sun };
+        // --- Toggle tile (top-left) — tracks daylight from weather backend ---
+        let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" }; // sun / moon
+        let mut icon_color = if self.weather_is_day { c.sun } else { c.clock };
         icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
         let icon_w = measure_text(&mut self.font_system, icon_char, ICON_SIZE, fa, Weight::BLACK);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,

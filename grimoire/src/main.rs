@@ -599,11 +599,9 @@ impl App {
         let bg = self.colors.background;
         let bg_alpha = self.colors.background_alpha;
         let bar_bg = self.colors.bar_bg;
-        let bar_border = self.colors.bar_border;
         let border = self.colors.border;
         let text_color = self.colors.text;
         let comment_color = self.colors.text_comment;
-        let placeholder_color = self.colors.text_placeholder;
         let sel_color = self.colors.selection;
         let sel_alpha = self.colors.selection_alpha;
         let row_h = self.row_height();
@@ -639,25 +637,14 @@ impl App {
         // Search bar background
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, width, BAR_H as u32, bar_bg, bg_alpha);
 
-        // Search bar bottom border
-        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, BAR_H as u32 - 2, width, 2, bar_border, bg_alpha);
-
         // Window border
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, width, 2, border, bg_alpha);
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, height - 2, width, 2, border, bg_alpha);
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, 2, height, border, bg_alpha);
         fill_rect_alpha(pixmap.data_mut(), pw, ph, width - 2, 0, 2, height, border, bg_alpha);
 
-        // Search text or placeholder
-        if self.input.is_empty() {
-            let placeholder = "Search...";
-            let tw = measure_text(&mut self.font_system, placeholder, font_size, &self.font_family);
-            let tx = (width as f32 - tw) / 2.0;
-            let ty = (BAR_H + font_size) / 2.0;
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                placeholder, tx, ty, font_size, width as f32, BAR_H, placeholder_color,
-                &self.font_family);
-        } else {
+        // Search text
+        if !self.input.is_empty() {
             let tw = measure_text(&mut self.font_system, &self.input, font_size, &self.font_family);
             let tx = (width as f32 - tw) / 2.0;
             let ty = (BAR_H + font_size) / 2.0;
