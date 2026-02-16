@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use libc;
-use std::process::Command;
+use std::process::{Command, Child, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,8 @@ struct Config {
     timer2_duration: u64,
     bt_device_1: String,
     bt_device_2: String,
+    weather_lat: f64,
+    weather_lon: f64,
 }
 
 impl Default for Config {
@@ -53,11 +55,13 @@ impl Default for Config {
             color_file: Some("~/.cache/wal/colors-raven.toml".into()),
             font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
-            font_size: 30.0,
+            font_size: 39.0,
             timer1_duration: 3600,
             timer2_duration: 900,
             bt_device_1: "AC:BF:71:08:A1:D6".into(),
             bt_device_2: "EC:81:93:AC:8B:60".into(),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
         }
     }
 }
@@ -99,7 +103,11 @@ struct Colors {
     background_alpha: u8,
     border: [u8; 3],
     divider: [u8; 3],
-    accent: [[u8; 3]; 6],
+    sun: [u8; 3],
+    clock: [u8; 3],
+    weather: [u8; 3],
+    ui: [u8; 3],
+    dots: [[u8; 3]; 16],
 }
 
 impl Default for Colors {
@@ -109,13 +117,16 @@ impl Default for Colors {
             background_alpha: 0xe6, // ~0.9
             border: [0xcd, 0xd6, 0xf4],
             divider: [0xcd, 0xd6, 0xf4],
-            accent: [
-                [0xf3, 0x8b, 0xa8], // dot1
-                [0xa6, 0xe3, 0xa1], // dot2
-                [0xf9, 0xe2, 0xaf], // sun
-                [0x89, 0xb4, 0xfa], // clock
-                [0xcb, 0xa6, 0xf7], // ui
-                [0x94, 0xe2, 0xd5], // dot6
+            sun: [0xf9, 0xe2, 0xaf],
+            clock: [0x89, 0xb4, 0xfa],
+            weather: [0x94, 0xe2, 0xd5],
+            ui: [0xcb, 0xa6, 0xf7],
+            dots: [
+                [0xcd, 0xd6, 0xf4], // foreground
+                [0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa],
+                [0xcb, 0xa6, 0xf7], [0x94, 0xe2, 0xd5], [0xf2, 0xcd, 0xcd], [0xb4, 0xbe, 0xfe],
+                [0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa],
+                [0xcb, 0xa6, 0xf7], [0x94, 0xe2, 0xd5], [0xf2, 0xcd, 0xcd],
             ],
         }
     }
@@ -150,13 +161,18 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "background" => colors.background = c,
                             "border" => colors.border = c,
                             "divider" => colors.divider = c,
-                            "dot1" => colors.accent[0] = c,
-                            "dot2" => colors.accent[1] = c,
-                            "sun" => colors.accent[2] = c,
-                            "clock" => colors.accent[3] = c,
-                            "ui" => colors.accent[4] = c,
-                            "dot6" => colors.accent[5] = c,
-                            _ => {}
+                            "sun" => colors.sun = c,
+                            "clock" => colors.clock = c,
+                            "weather" => colors.weather = c,
+                            "ui" => colors.ui = c,
+                            "foreground" => colors.dots[0] = c,
+                            _ => {
+                                if let Some(n) = key.strip_prefix("color") {
+                                    if let Ok(i) = n.parse::<usize>() {
+                                        if i >= 1 && i <= 15 { colors.dots[i] = c; }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -166,52 +182,49 @@ fn load_colors(path: Option<&str>) -> Colors {
     colors
 }
 
-// --- Timer State ---
+// --- State ---
 
 #[derive(Serialize, Deserialize, Default)]
-struct TimerState {
-    timer1_duration: i64,
-    timer1_started: u64,
-    #[serde(default)]
-    timer1_base: i64,
-    timer2_duration: i64,
-    timer2_started: u64,
-    #[serde(default)]
-    timer2_base: i64,
+struct State {
+    #[serde(default)] timer1_duration: i64,
+    #[serde(default)] timer1_started: u64,
+    #[serde(default)] timer1_base: i64,
+    #[serde(default)] timer2_duration: i64,
+    #[serde(default)] timer2_started: u64,
+    #[serde(default)] timer2_base: i64,
+    #[serde(default)] weather_temp: f64,
+    #[serde(default)] weather_feels: f64,
+    #[serde(default)] weather_code: u32,
+    #[serde(default)] weather_is_day: bool,
+    #[serde(default)] weather_fetched: u64,
 }
 
-fn state_dir() -> PathBuf {
+fn state_path() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    base.join("widgets/raven")
+    base.join("widgets/raven.toml")
 }
 
-fn load_timer_state(cfg: &Config) -> TimerState {
-    let path = state_dir().join("timers.toml");
-    let fallback = || TimerState {
-        timer1_duration: cfg.timer1_duration as i64,
-        timer1_base: cfg.timer1_duration as i64,
-        timer2_duration: cfg.timer2_duration as i64,
-        timer2_base: cfg.timer2_duration as i64,
-        ..Default::default()
+fn load_state(cfg: &Config) -> State {
+    let mut st = match std::fs::read_to_string(state_path()) {
+        Ok(s) => toml::from_str(&s).unwrap_or_default(),
+        Err(_) => State::default(),
     };
-    let mut ts = match std::fs::read_to_string(&path) {
-        Ok(s) => toml::from_str(&s).unwrap_or_else(|_| fallback()),
-        Err(_) => fallback(),
-    };
-    // Backward compat: base defaults to config duration when not in state file
-    if ts.timer1_base == 0 { ts.timer1_base = cfg.timer1_duration as i64; }
-    if ts.timer2_base == 0 { ts.timer2_base = cfg.timer2_duration as i64; }
-    ts
+    if st.timer1_base == 0 { st.timer1_base = cfg.timer1_duration as i64; }
+    if st.timer2_base == 0 { st.timer2_base = cfg.timer2_duration as i64; }
+    if st.timer1_duration == 0 { st.timer1_duration = cfg.timer1_duration as i64; }
+    if st.timer2_duration == 0 { st.timer2_duration = cfg.timer2_duration as i64; }
+    st
 }
 
-fn save_timer_state(state: &TimerState) {
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir).ok();
-    let s = toml::to_string(state).unwrap();
-    std::fs::write(dir.join("timers.toml"), s).ok();
+fn save_state(state: &State) {
+    let path = state_path();
+    std::fs::create_dir_all(path.parent().unwrap()).ok();
+    std::fs::write(path, toml::to_string(state).unwrap()).ok();
 }
+
+const WEATHER_MAX_AGE: u64 = 3600;
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -228,6 +241,19 @@ fn format_timer(secs: i64) -> String {
     let m = abs / 60;
     let s = abs % 60;
     format!("{sign}{m}:{s:02}")
+}
+
+
+fn weather_icon(code: u32, is_day: bool) -> &'static str {
+    match code {
+        0 | 1 => if is_day { "\u{f185}" } else { "\u{f186}" }, // fa-sun / fa-moon
+        2 | 3 => "\u{f0c2}",           // fa-cloud
+        45 | 48 => "\u{f75f}",         // fa-smog
+        51..=67 | 80..=82 => "\u{f73d}", // fa-cloud-rain
+        71..=77 | 85 | 86 => "\u{f2dc}", // fa-snowflake
+        95 | 96 | 99 => "\u{f0e7}",    // fa-bolt
+        _ => "\u{f0c2}",
+    }
 }
 
 // --- Audio ---
@@ -275,21 +301,21 @@ fn switch_audio(target_mac: &str) {
 
 // --- Layout constants ---
 
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 202;
+const WIDTH: u32 = 410;
+const HEIGHT: u32 = 230;
 const OUTER: u32 = 3;   // outer border thickness
 const INNER: u32 = 1;   // inner divider thickness
-const LEFT_W: u32 = 42;
-const RIGHT_W: u32 = 42;
-const TOGGLE_H: u32 = 38;  // left column split
-const CLOCK_H: u32 = 145;  // center column split
-// AUDIO_H removed — audio tile now aligns with timer row
+const LEFT_W: u32 = 58;
+const RIGHT_W: u32 = 58;
+const TOGGLE_H: u32 = 48;  // left column split
+const CLOCK_H: u32 = 110;  // center column split
+const AUDIO_H: u32 = 55;
 
 // Font/text sizes
-const ICON_SIZE: f32 = 25.0;
-const DOT_SIZE: f32 = 22.0;
-const DATE_SIZE: f32 = 18.0;
-const TIMER_SIZE: f32 = 26.0;
+const ICON_SIZE: f32 = 32.0;
+const DOT_SIZE: f32 = 28.0;
+const DATE_SIZE: f32 = 23.0;
+const TIMER_SIZE: f32 = 34.0;
 const LINE_HEIGHT: f32 = 1.2;
 const CLOCK_DATE_GAP: f32 = 2.0;
 
@@ -297,16 +323,21 @@ const CLOCK_DATE_GAP: f32 = 2.0;
 const HOVER_OPACITY_DEFAULT: f32 = 0.7;
 
 // Volume
-const VOL_BAR_PAD: u32 = 12;
+const VOL_BAR_PAD: u32 = 8;
 const VOL_BAR_W: u32 = 12;
-const VOL_BG_ALPHA: f32 = 0.3;
+const VOL_BG_ALPHA: f32 = 0.45;
 const VOL_SCROLL_STEP: f32 = 0.05;
 const VOL_MAX: f32 = 2.0;
 
 // Timers
 const TIMER_SCROLL_STEP: i64 = 60;
+const TIMER_PAD: u32 = 8;
 // Timers
 const INACTIVE_ALPHA: f32 = 0.8;
+
+// Weather
+const WEATHER_ICON_SIZE: f32 = 30.0;
+const WEATHER_TEMP_SIZE: f32 = 15.0;
 
 // Timing
 const TICK_MS: u64 = 100;
@@ -330,6 +361,7 @@ struct Layout {
     toggle: Rect,
     dots: Rect,
     clock: Rect,
+    weather: Rect,
     timer1: Rect,
     timer2: Rect,
     volume: Rect,
@@ -344,15 +376,18 @@ fn layout(w: u32, h: u32) -> Layout {
     let right_x = w - OUTER - RIGHT_W;
     let timer_y = OUTER + CLOCK_H + INNER;
     let timer_h = interior_h - CLOCK_H - INNER;
-    let timer_w = (center_w - INNER) / 2;
+    let timer_half = timer_h / 2;
+    let clock_w = center_w * 2 / 3;
+    let weather_w = center_w - clock_w - INNER;
     Layout {
         toggle: Rect { x: OUTER, y: OUTER, w: LEFT_W, h: TOGGLE_H },
         dots: Rect { x: OUTER, y: OUTER + TOGGLE_H + INNER, w: LEFT_W, h: interior_h - TOGGLE_H - INNER },
-        clock: Rect { x: center_x, y: OUTER, w: center_w, h: CLOCK_H },
-        timer1: Rect { x: center_x, y: timer_y, w: timer_w, h: timer_h },
-        timer2: Rect { x: center_x + timer_w + INNER, y: timer_y, w: center_w - timer_w - INNER, h: timer_h },
-        volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: CLOCK_H },
-        audio: Rect { x: right_x, y: timer_y, w: RIGHT_W, h: timer_h },
+        clock: Rect { x: center_x, y: OUTER, w: clock_w, h: CLOCK_H },
+        weather: Rect { x: center_x + clock_w + INNER, y: OUTER, w: weather_w, h: CLOCK_H },
+        timer2: Rect { x: center_x, y: timer_y + TIMER_PAD, w: center_w, h: timer_half - TIMER_PAD },
+        timer1: Rect { x: center_x, y: timer_y + timer_half, w: center_w, h: timer_h - timer_half - TIMER_PAD },
+        volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: interior_h - AUDIO_H },
+        audio: Rect { x: right_x, y: h - OUTER - AUDIO_H, w: RIGHT_W, h: AUDIO_H },
     }
 }
 
@@ -411,17 +446,29 @@ struct App {
     // Volume drag
     dragging_volume: bool,
     volume_set_at: u64,
+    // Weather
+    weather_temp: f64,
+    weather_feels: f64,
+    weather_code: u32,
+    weather_is_day: bool,
+    weather_fetched: u64,
+    weather_fetch: Option<Child>,
 }
 
 impl App {
-    fn timer_state(&self) -> TimerState {
-        TimerState {
+    fn state(&self) -> State {
+        State {
             timer1_duration: self.timer1_duration,
             timer1_started: self.timer1_started,
             timer1_base: self.timer1_base,
             timer2_duration: self.timer2_duration,
             timer2_started: self.timer2_started,
             timer2_base: self.timer2_base,
+            weather_temp: self.weather_temp,
+            weather_feels: self.weather_feels,
+            weather_code: self.weather_code,
+            weather_is_day: self.weather_is_day,
+            weather_fetched: self.weather_fetched,
         }
     }
 
@@ -478,16 +525,14 @@ impl App {
 
         // Per-column horizontal dividers (each only spans its column)
         fill_rect(pixmap.data_mut(), pw, ph, OUTER, lay.toggle.y + lay.toggle.h, LEFT_W, INNER, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x, lay.clock.y + lay.clock.h, lay.clock.w, INNER, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x, lay.clock.y + lay.clock.h, lay.clock.w + INNER + lay.weather.w, INNER, divider);
 
-        // Timer split (vertical, within timer area of center column)
-        fill_rect(pixmap.data_mut(), pw, ph, lay.timer1.x + lay.timer1.w, lay.timer1.y, INNER, lay.timer1.h, divider);
 
         let fa = &self.icon_family;
 
         // --- Toggle tile (top-left) ---
-        let icon_char = if self.is_dim { "\u{f186}" } else { "\u{f185}" };
-        let mut icon_color = if self.is_dim { c.accent[3] } else { c.accent[2] };
+        let icon_char = if self.is_dim { "\u{f186}" } else { "\u{f185}" }; // moon / sun (outline)
+        let mut icon_color = if self.is_dim { c.clock } else { c.sun };
         icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
         let icon_w = measure_text(&mut self.font_system, icon_char, ICON_SIZE, fa, Weight::BLACK);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
@@ -497,16 +542,27 @@ impl App {
             ICON_SIZE, lay.toggle.w as f32, lay.toggle.h as f32, icon_color,
             fa, Weight::BLACK);
 
-        // --- Dots tile (bottom-left, vertical) ---
+        // --- Dots tile (bottom-left, 7x2 grid, down-first) ---
+        // Order: foreground, color1..color6 down left col, color7..color13 down right col
         let dot_char = "\u{25cf}";
-        let dot_step = lay.dots.h as f32 / 6.0;
-        for (i, &color) in c.accent.iter().enumerate() {
-            let dw = measure_text(&mut self.font_system, dot_char, DOT_SIZE, &self.font_family, Weight::BOLD);
+        let dot_rows: usize = 7;
+        let dot_cols: usize = 2;
+        let dot_pad_y: f32 = 5.0;
+        let dot_step_y = (lay.dots.h as f32 - 2.0 * dot_pad_y) / dot_rows as f32;
+        let dw = measure_text(&mut self.font_system, dot_char, DOT_SIZE, &self.font_family, Weight::BOLD);
+        let full_step_x = lay.dots.w as f32 / dot_cols as f32;
+        let dot_gap_x = (full_step_x - dw) / 3.0;
+        let dot_step_x = dw + dot_gap_x;
+        let grid_w = dot_step_x * dot_cols as f32;
+        let grid_x = lay.dots.x as f32 + (lay.dots.w as f32 - grid_w) / 2.0;
+        for i in 0..14 {
+            let col = i / dot_rows;
+            let row = i % dot_rows;
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
                 dot_char,
-                center_x(lay.dots.x as f32, lay.dots.w as f32, dw),
-                center_y(lay.dots.y as f32 + i as f32 * dot_step, dot_step, DOT_SIZE, 0.0),
-                DOT_SIZE, lay.dots.w as f32, dot_step, color,
+                center_x(grid_x + col as f32 * dot_step_x, dot_step_x, dw),
+                center_y(lay.dots.y as f32 + dot_pad_y + row as f32 * dot_step_y, dot_step_y, DOT_SIZE, 0.0),
+                DOT_SIZE, dot_step_x, dot_step_y, c.dots[i],
                 &self.font_family, Weight::BOLD);
         }
 
@@ -525,7 +581,7 @@ impl App {
             &time_str,
             center_x(lay.clock.x as f32, lay.clock.w as f32, time_w),
             block_y,
-            time_size, lay.clock.w as f32, lay.clock.h as f32, c.accent[3],
+            time_size, lay.clock.w as f32, lay.clock.h as f32, c.clock,
             &self.font_family, Weight::BOLD);
 
         let date_w = measure_text(&mut self.font_system, &date_str, DATE_SIZE, &self.font_family, Weight::BOLD);
@@ -533,14 +589,40 @@ impl App {
             &date_str,
             center_x(lay.clock.x as f32, lay.clock.w as f32, date_w),
             block_y + time_line_h + CLOCK_DATE_GAP,
-            DATE_SIZE, lay.clock.w as f32, lay.clock.h as f32, c.accent[3],
+            DATE_SIZE, lay.clock.w as f32, lay.clock.h as f32, alpha_color(c.clock, 0.6),
             &self.font_family, Weight::BOLD);
+
+        // --- Weather tile (right side of clock) ---
+        let wr = lay.weather;
+        fill_rect(pixmap.data_mut(), pw, ph, wr.x - INNER, wr.y, INNER, wr.h, divider);
+        if self.weather_fetched > 0 {
+            let icon = weather_icon(self.weather_code, self.weather_is_day);
+            let icon_w = measure_text(&mut self.font_system, icon, WEATHER_ICON_SIZE, fa, Weight::NORMAL);
+            let icon_line_h = WEATHER_ICON_SIZE * LINE_HEIGHT;
+            let temp_line_h = WEATHER_TEMP_SIZE * LINE_HEIGHT;
+            let block_h = icon_line_h + CLOCK_DATE_GAP + temp_line_h;
+            let block_y = wr.y as f32 + (wr.h as f32 - block_h) / 2.0;
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                icon,
+                center_x(wr.x as f32, wr.w as f32, icon_w),
+                block_y,
+                WEATHER_ICON_SIZE, wr.w as f32, wr.h as f32, c.weather,
+                fa, Weight::NORMAL);
+            let temp_str = format!("{:.0}°({:.0}°)", self.weather_temp, self.weather_feels);
+            let temp_w = measure_text(&mut self.font_system, &temp_str, WEATHER_TEMP_SIZE, &self.font_family, Weight::BOLD);
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                &temp_str,
+                center_x(wr.x as f32, wr.w as f32, temp_w),
+                block_y + icon_line_h + CLOCK_DATE_GAP,
+                WEATHER_TEMP_SIZE, wr.w as f32, wr.h as f32, alpha_color(c.weather, 0.6),
+                &self.font_family, Weight::BOLD);
+        }
 
         // --- Timer 1 tile (bottom-center-left) ---
         let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
         let t1_str = format_timer(t1_rem);
-        let mut t1_color = if self.timer1_started > 0 { c.accent[4] }
-                          else { alpha_color(c.accent[4], INACTIVE_ALPHA) };
+        let mut t1_color = if self.timer1_started > 0 { c.ui }
+                          else { alpha_color(c.ui, INACTIVE_ALPHA) };
         t1_color = alpha_color(t1_color, if self.hover == HoverTile::Timer1 { 1.0 } else { HOVER_OPACITY_DEFAULT });
         let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
@@ -553,8 +635,8 @@ impl App {
         // --- Timer 2 tile (bottom-center-right) ---
         let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
         let t2_str = format_timer(t2_rem);
-        let mut t2_color = if self.timer2_started > 0 { c.accent[4] }
-                          else { alpha_color(c.accent[4], INACTIVE_ALPHA) };
+        let mut t2_color = if self.timer2_started > 0 { c.ui }
+                          else { alpha_color(c.ui, INACTIVE_ALPHA) };
         t2_color = alpha_color(t2_color, if self.hover == HoverTile::Timer2 { 1.0 } else { HOVER_OPACITY_DEFAULT });
         let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
@@ -569,7 +651,7 @@ impl App {
         let vol_bar_h = lay.volume.h - 2 * VOL_BAR_PAD;
         let bar_x = lay.volume.x + (lay.volume.w - VOL_BAR_W) / 2;
 
-        let vol_bg_color = alpha_color(c.accent[4], VOL_BG_ALPHA);
+        let vol_bg_color = alpha_color(c.ui, VOL_BG_ALPHA);
         fill_rect(pixmap.data_mut(), pw, ph, bar_x, vol_bar_top, VOL_BAR_W, vol_bar_h, vol_bg_color);
 
         let fill_frac = (self.volume / VOL_MAX).clamp(0.0, 1.0);
@@ -577,12 +659,12 @@ impl App {
         if fill_h > 0 {
             let opacity = if self.muted { 0x4d } else { 0xff };
             fill_rect_alpha(pixmap.data_mut(), pw, ph,
-                bar_x, vol_bar_top + vol_bar_h - fill_h, VOL_BAR_W, fill_h, c.accent[4], opacity);
+                bar_x, vol_bar_top + vol_bar_h - fill_h, VOL_BAR_W, fill_h, c.ui, opacity);
         }
 
         // --- Audio tile (bottom-right) ---
         let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
-        let mut ai_color = if self.muted { alpha_color(c.accent[4], VOL_BG_ALPHA) } else { c.accent[4] };
+        let mut ai_color = if self.muted { alpha_color(c.ui, VOL_BG_ALPHA) } else { c.ui };
         ai_color = alpha_color(ai_color, if self.hover == HoverTile::Audio { 1.0 } else { HOVER_OPACITY_DEFAULT });
         let ai_w = measure_text(&mut self.font_system, audio_icon, ICON_SIZE, fa, Weight::BLACK);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
@@ -637,7 +719,7 @@ impl App {
             } else {
                 self.timer1_started = now_unix();
             }
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
             return;
         }
@@ -650,7 +732,7 @@ impl App {
             } else {
                 self.timer2_started = now_unix();
             }
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
             return;
         }
@@ -680,7 +762,7 @@ impl App {
             let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
             self.timer1_duration = (self.timer1_duration + delta).max(TIMER_SCROLL_STEP);
             self.timer1_base = self.timer1_duration;
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
             return;
         }
@@ -689,7 +771,7 @@ impl App {
             let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
             self.timer2_duration = (self.timer2_duration + delta).max(TIMER_SCROLL_STEP);
             self.timer2_base = self.timer2_duration;
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
         }
     }
@@ -701,7 +783,7 @@ impl App {
         if lay.timer1.contains(mx, my) {
             self.timer1_duration = self.timer1_base;
             self.timer1_started = 0;
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
             return;
         }
@@ -709,7 +791,7 @@ impl App {
         if lay.timer2.contains(mx, my) {
             self.timer2_duration = self.timer2_base;
             self.timer2_started = 0;
-            save_timer_state(&self.timer_state());
+            save_state(&self.state());
             self.draw();
         }
     }
@@ -972,7 +1054,19 @@ delegate_registry!(App);
 fn main() {
     let cfg = load_config();
     let colors = load_colors(cfg.color_file.as_deref());
-    let ts = load_timer_state(&cfg);
+    let st = load_state(&cfg);
+    let weather_fetch = if cfg.weather_lat != 0.0 && now_unix() - st.weather_fetched > WEATHER_MAX_AGE {
+        Command::new("curl")
+            .args(["-s", "--max-time", "5", &format!(
+                "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,apparent_temperature,weather_code,is_day&temperature_unit=fahrenheit",
+                cfg.weather_lat, cfg.weather_lon)])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn().ok()
+    } else {
+        None
+    };
+
     let (volume, muted) = get_volume();
     let headphones = is_headphones();
 
@@ -1004,6 +1098,10 @@ fn main() {
     let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
     db.load_font_data(icon_data);
     let icon_family = db.faces().last().expect("icon font file contains no faces").families[0].0.clone();
+    // Load FA Regular for outline icons (same family, Weight::NORMAL)
+    if let Ok(data) = std::fs::read("/usr/share/fonts/OTF/Font Awesome 7 Free-Regular-400.otf") {
+        db.load_font_data(data);
+    }
     let font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
 
     let mut app = App {
@@ -1024,10 +1122,10 @@ fn main() {
         font_size: cfg.font_size,
         font_family,
         icon_family,
-        timer1_duration: ts.timer1_duration,
-        timer1_started: ts.timer1_started,
-        timer2_duration: ts.timer2_duration,
-        timer2_started: ts.timer2_started,
+        timer1_duration: st.timer1_duration,
+        timer1_started: st.timer1_started,
+        timer2_duration: st.timer2_duration,
+        timer2_started: st.timer2_started,
         volume,
         muted,
         headphones,
@@ -1035,10 +1133,16 @@ fn main() {
         bt_device_2: cfg.bt_device_2,
         is_dim: false,
         hover: HoverTile::None,
-        timer1_base: ts.timer1_base,
-        timer2_base: ts.timer2_base,
+        timer1_base: st.timer1_base,
+        timer2_base: st.timer2_base,
         dragging_volume: false,
         volume_set_at: 0,
+        weather_temp: st.weather_temp,
+        weather_feels: st.weather_feels,
+        weather_code: st.weather_code,
+        weather_is_day: st.weather_is_day,
+        weather_fetched: st.weather_fetched,
+        weather_fetch,
     };
 
     // 1-second timer for clock/timer redraws
@@ -1047,6 +1151,39 @@ fn main() {
         if now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.refresh_audio();
         }
+        // Poll background weather fetch
+        let done = match app.weather_fetch.as_mut() {
+            Some(child) => child.try_wait().ok().flatten().is_some(),
+            None => false,
+        };
+        if done {
+            let child = app.weather_fetch.take().unwrap();
+            if let Ok(output) = child.wait_with_output() {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    // Scope to "current":{ to skip "current_units"
+                    if let Some(ci) = text.find("\"current\":{") {
+                        let s = &text[ci..];
+                        let num_at = |s: &str, needle: &str| -> Option<f64> {
+                            let after = s[s.find(needle)? + needle.len()..].trim_start();
+                            after[..after.find(|c: char| c == ',' || c == '}')?].trim().parse().ok()
+                        };
+                        let temp = num_at(s, "\"temperature_2m\":");
+                        let feels = num_at(s, "\"apparent_temperature\":");
+                        let code = num_at(s, "\"weather_code\":").map(|v| v as u32);
+                        let is_day = num_at(s, "\"is_day\":").map(|v| v as u32 == 1);
+                        if let (Some(temp), Some(feels), Some(code), Some(is_day)) = (temp, feels, code, is_day) {
+                            app.weather_temp = temp;
+                            app.weather_feels = feels;
+                            app.weather_code = code;
+                            app.weather_is_day = is_day;
+                            app.weather_fetched = now_unix();
+                            save_state(&app.state());
+                        }
+                    }
+                }
+            }
+        }
         app.draw();
         TimeoutAction::ToDuration(std::time::Duration::from_millis(TICK_MS))
     }).unwrap();
@@ -1054,7 +1191,7 @@ fn main() {
     loop {
         event_loop.dispatch(std::time::Duration::from_millis(TICK_MS), &mut app).unwrap();
         if app.exit {
-            save_timer_state(&app.timer_state());
+            save_state(&app.state());
             break;
         }
     }

@@ -343,7 +343,7 @@ fn frecency_state_path() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap()).join(".local/state"));
-    base.join("widgets/grimoire/frecency.toml")
+    base.join("widgets/grimoire.toml")
 }
 
 fn load_frecency() -> HashMap<String, FrecencyEntry> {

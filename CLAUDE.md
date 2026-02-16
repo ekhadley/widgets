@@ -86,7 +86,7 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 ### raven
 
-Floating overlay for Hyprland — clock, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
+Floating overlay for Hyprland — clock, weather, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
@@ -96,36 +96,40 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 
 **Features:**
 - Clock (HH:MM:SS + "Month Day"), updates every second via calloop timer
+- Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
-- Timer state persists to `~/.local/state/widgets/raven/timers.toml` (survives close/reopen)
+- State persists to `~/.local/state/widgets/raven.toml` (timers + weather cache survive close/reopen)
 - Volume bar (0-200%) via `wpctl`, scroll to adjust
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
 - Day/night toggle via `dim_toggle.sh`
-- 6 color dots from walrs palette
+- 14 color dots from walrs palette (7×2 grid)
 - Hover highlighting on interactive tiles (toggle, timer1, timer2, audio)
-- Font Awesome 7 Free (weight BLACK) for icons (toggle sun/moon, audio headphones/speaker)
+- Font Awesome 7 Free Solid (weight BLACK) for filled icons, FA Regular (weight NORMAL) for outline icons. Toggle uses filled sun/moon, weather uses outline.
 
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
 - `App::handle_click()` / `App::handle_scroll()` / `App::handle_right_click()` / `App::hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
-- Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for all 7 tiles: toggle, dots, clock, timer1, timer2, volume, audio
-- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`. Raven is 320×202.
+- Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for 8 tiles: toggle, dots, clock, weather, timer1, timer2, volume, audio
+- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`. Raven is 410×230.
 - Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
-- calloop `Timer` fires every 1s for clock/timer redraws
+- Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
+- calloop `Timer` fires every 100ms for clock/timer/weather redraws
 
 **Config** — `~/.config/widgets/raven.toml` (all optional):
 ```toml
 color_file = "~/.cache/wal/colors-raven.toml"
 font = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"
 icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
-font_size = 30.0
+font_size = 39.0
 timer1_duration = 3600
 timer2_duration = 900
 bt_device_1 = "AC:BF:71:08:A1:D6"
 bt_device_2 = "EC:81:93:AC:8B:60"
+weather_lat = 38.81
+weather_lon = -89.95
 ```
 
-**Color keys:** `background`, `background_opacity`, `border`, `divider`, `dot1`–`dot6`, `sun`, `clock`, `ui`
+**Color keys:** `background`, `background_opacity`, `border`, `divider`, `sun`, `clock`, `weather`, `ui`, `foreground`, `color1`–`color15`
 
 ### grimoire
 
@@ -190,6 +194,8 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 ### raven
 - Scrolling the timers to change duration should be persistent and saved. Right click reset should reset them to their current duration, not the default duration.
 - pausing a timer that is negative sets it to 0:00
+- Network tile — wifi SSID + signal strength or ethernet indicator
+- Notification toggle — click to enable/disable `makoctl` (or similar) do-not-disturb mode
 
 ### grimoire
 - Frequency+recency sorting — track launch counts and timestamps, sort items by combined score so frequently/recently used apps appear first. (Can copy from rofi cache?)
