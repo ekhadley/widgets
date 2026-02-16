@@ -315,7 +315,7 @@ const AUDIO_H: u32 = 55;
 const ICON_SIZE: f32 = 32.0;
 const DOT_SIZE: f32 = 28.0;
 const DATE_SIZE: f32 = 23.0;
-const TIMER_SIZE: f32 = 34.0;
+const TIMER_SIZE: f32 = 27.0;
 const LINE_HEIGHT: f32 = 1.2;
 const CLOCK_DATE_GAP: f32 = 2.0;
 
@@ -326,6 +326,7 @@ const HOVER_OPACITY_DEFAULT: f32 = 0.7;
 const VOL_BAR_PAD: u32 = 8;
 const VOL_BAR_W: u32 = 12;
 const VOL_BG_ALPHA: f32 = 0.45;
+const VOL_BEVEL_H: u32 = 6; // (VOL_BAR_W/2) * tan(45°)
 const VOL_SCROLL_STEP: f32 = 0.05;
 const VOL_MAX: f32 = 2.0;
 
@@ -336,8 +337,8 @@ const TIMER_PAD: u32 = 8;
 const INACTIVE_ALPHA: f32 = 0.8;
 
 // Weather
-const WEATHER_ICON_SIZE: f32 = 30.0;
-const WEATHER_TEMP_SIZE: f32 = 15.0;
+const WEATHER_ICON_SIZE: f32 = 34.0;
+const WEATHER_TEMP_SIZE: f32 = 17.0;
 
 // Timing
 const TICK_MS: u64 = 100;
@@ -345,6 +346,7 @@ const AUDIO_REFRESH_COOLDOWN: u64 = 1;
 
 // Audio icon
 const AUDIO_ICON_NUDGE: f32 = -0.1;
+const CORNER_BEVEL: u32 = 20;
 
 // --- Tile geometry ---
 
@@ -378,14 +380,16 @@ fn layout(w: u32, h: u32) -> Layout {
     let timer_h = interior_h - CLOCK_H - INNER;
     let timer_half = timer_h / 2;
     let clock_w = center_w * 2 / 3;
-    let weather_w = center_w - clock_w - INNER;
+    let weather_w = center_w * 2 / 5;
+    let timer_w = center_w - weather_w - INNER;
+    let timer_x = center_x + weather_w + INNER;
     Layout {
         toggle: Rect { x: OUTER, y: OUTER, w: LEFT_W, h: TOGGLE_H },
         dots: Rect { x: OUTER, y: OUTER + TOGGLE_H + INNER, w: LEFT_W, h: interior_h - TOGGLE_H - INNER },
         clock: Rect { x: center_x, y: OUTER, w: clock_w, h: CLOCK_H },
-        weather: Rect { x: center_x + clock_w + INNER, y: OUTER, w: weather_w, h: CLOCK_H },
-        timer2: Rect { x: center_x, y: timer_y + TIMER_PAD, w: center_w, h: timer_half - TIMER_PAD },
-        timer1: Rect { x: center_x, y: timer_y + timer_half, w: center_w, h: timer_h - timer_half - TIMER_PAD },
+        weather: Rect { x: center_x, y: timer_y, w: weather_w, h: timer_h },
+        timer2: Rect { x: timer_x, y: timer_y + TIMER_PAD, w: timer_w, h: timer_half - TIMER_PAD },
+        timer1: Rect { x: timer_x, y: timer_y + timer_half, w: timer_w, h: timer_h - timer_half - TIMER_PAD },
         volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: interior_h - AUDIO_H },
         audio: Rect { x: right_x, y: h - OUTER - AUDIO_H, w: RIGHT_W, h: AUDIO_H },
     }
@@ -525,7 +529,13 @@ impl App {
 
         // Per-column horizontal dividers (each only spans its column)
         fill_rect(pixmap.data_mut(), pw, ph, OUTER, lay.toggle.y + lay.toggle.h, LEFT_W, INNER, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x, lay.clock.y + lay.clock.h, lay.clock.w + INNER + lay.weather.w, INNER, divider);
+        let center_w = self.width - 2 * OUTER - LEFT_W - RIGHT_W - 2 * INNER;
+        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x, lay.clock.y + lay.clock.h, center_w, INNER, divider);
+
+        // Top: vertical divider between clock and empty tile
+        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x + lay.clock.w, OUTER, INNER, CLOCK_H, divider);
+        // Bottom: vertical divider between weather and timers
+        fill_rect(pixmap.data_mut(), pw, ph, lay.weather.x + lay.weather.w, lay.weather.y, INNER, lay.weather.h, divider);
 
 
         let fa = &self.icon_family;
@@ -592,9 +602,8 @@ impl App {
             DATE_SIZE, lay.clock.w as f32, lay.clock.h as f32, alpha_color(c.clock, 0.6),
             &self.font_family, Weight::BOLD);
 
-        // --- Weather tile (right side of clock) ---
+        // --- Weather tile (bottom-left of center) ---
         let wr = lay.weather;
-        fill_rect(pixmap.data_mut(), pw, ph, wr.x - INNER, wr.y, INNER, wr.h, divider);
         if self.weather_fetched > 0 {
             let icon = weather_icon(self.weather_code, self.weather_is_day);
             let icon_w = measure_text(&mut self.font_system, icon, WEATHER_ICON_SIZE, fa, Weight::NORMAL);
@@ -651,15 +660,39 @@ impl App {
         let vol_bar_h = lay.volume.h - 2 * VOL_BAR_PAD;
         let bar_x = lay.volume.x + (lay.volume.w - VOL_BAR_W) / 2;
 
+        let bevel = VOL_BEVEL_H as f32;
+        let bl = bar_x as f32;
+        let br = (bar_x + VOL_BAR_W) as f32;
+        let bcx = bl + VOL_BAR_W as f32 / 2.0;
+        let bt = vol_bar_top as f32;
+        let bb = (vol_bar_top + vol_bar_h) as f32;
+
         let vol_bg_color = alpha_color(c.ui, VOL_BG_ALPHA);
-        fill_rect(pixmap.data_mut(), pw, ph, bar_x, vol_bar_top, VOL_BAR_W, vol_bar_h, vol_bg_color);
+        fill_triangle(pixmap.data_mut(), pw, ph,
+            [(bcx, bt), (bl, bt + bevel), (br, bt + bevel)], vol_bg_color, 0xff, 0, ph);
+        fill_rect(pixmap.data_mut(), pw, ph,
+            bar_x, vol_bar_top + VOL_BEVEL_H, VOL_BAR_W, vol_bar_h - 2 * VOL_BEVEL_H, vol_bg_color);
+        fill_triangle(pixmap.data_mut(), pw, ph,
+            [(bl, bb - bevel), (br, bb - bevel), (bcx, bb)], vol_bg_color, 0xff, 0, ph);
 
         let fill_frac = (self.volume / VOL_MAX).clamp(0.0, 1.0);
         let fill_h = (vol_bar_h as f32 * fill_frac) as u32;
         if fill_h > 0 {
             let opacity = if self.muted { 0x4d } else { 0xff };
-            fill_rect_alpha(pixmap.data_mut(), pw, ph,
-                bar_x, vol_bar_top + vol_bar_h - fill_h, VOL_BAR_W, fill_h, c.ui, opacity);
+            let fg_top = (vol_bar_top + vol_bar_h - fill_h) as f32;
+            // Foreground top bevel
+            fill_triangle(pixmap.data_mut(), pw, ph,
+                [(bcx, fg_top), (bl, fg_top + bevel), (br, fg_top + bevel)], c.ui, opacity, 0, ph);
+            // Foreground body
+            let body_top = vol_bar_top + vol_bar_h - fill_h + VOL_BEVEL_H;
+            let body_bot = vol_bar_top + vol_bar_h - VOL_BEVEL_H;
+            if body_bot > body_top {
+                fill_rect_alpha(pixmap.data_mut(), pw, ph,
+                    bar_x, body_top, VOL_BAR_W, body_bot - body_top, c.ui, opacity);
+            }
+            // Bottom bevel (follows overall bar shape)
+            fill_triangle(pixmap.data_mut(), pw, ph,
+                [(bl, bb - bevel), (br, bb - bevel), (bcx, bb)], c.ui, opacity, 0, ph);
         }
 
         // --- Audio tile (bottom-right) ---
@@ -673,6 +706,31 @@ impl App {
             center_y(lay.audio.y as f32, lay.audio.h as f32, ICON_SIZE, AUDIO_ICON_NUDGE),
             ICON_SIZE, lay.audio.w as f32, lay.audio.h as f32, ai_color,
             fa, Weight::BLACK);
+
+        // Bevel outside corners with border
+        let diag_border = (OUTER as f32 * std::f32::consts::SQRT_2).ceil() as u32;
+        let cr = CORNER_BEVEL + diag_border;
+        let data = pixmap.data_mut();
+        for py in 0..cr.min(ph) {
+            for px in 0..cr.min(pw) {
+                let d = px + py;
+                if d >= cr { continue; }
+                let corners: [(usize, usize); 4] = [
+                    (px as usize, py as usize),
+                    ((pw - 1 - px) as usize, py as usize),
+                    (px as usize, (ph - 1 - py) as usize),
+                    ((pw - 1 - px) as usize, (ph - 1 - py) as usize),
+                ];
+                for (cx, cy) in corners {
+                    let i = (cy * pw as usize + cx) * 4;
+                    if d < CORNER_BEVEL {
+                        data[i] = 0; data[i+1] = 0; data[i+2] = 0; data[i+3] = 0;
+                    } else {
+                        data[i] = border[0]; data[i+1] = border[1]; data[i+2] = border[2]; data[i+3] = 0xff;
+                    }
+                }
+            }
+        }
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
@@ -841,6 +899,58 @@ fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, 
         for px in x..x.saturating_add(w).min(pw) {
             let i = (py as usize * pw as usize + px as usize) * 4;
             data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 0xff;
+        }
+    }
+}
+
+fn fill_triangle(
+    data: &mut [u8], pw: u32, ph: u32,
+    verts: [(f32, f32); 3], c: [u8; 3], a: u8,
+    clip_y_min: u32, clip_y_max: u32,
+) {
+    if a == 0 { return; }
+    let mut v = verts;
+    if v[0].1 > v[1].1 { v.swap(0, 1); }
+    if v[1].1 > v[2].1 { v.swap(1, 2); }
+    if v[0].1 > v[1].1 { v.swap(0, 1); }
+    let (x0, y0) = v[0];
+    let (x1, y1) = v[1];
+    let (x2, y2) = v[2];
+    if (y2 - y0) < 0.5 { return; }
+    let y_start = ((y0 - 0.5).ceil().max(0.0) as u32).max(clip_y_min);
+    let y_end_f = (y2 - 0.5).floor().min((ph - 1) as f32).min(clip_y_max.saturating_sub(1) as f32);
+    if y_end_f < y_start as f32 { return; }
+    let y_end = y_end_f as u32;
+    for py in y_start..=y_end {
+        let y = py as f32 + 0.5;
+        let t_long = (y - y0) / (y2 - y0);
+        let x_long = x0 + t_long * (x2 - x0);
+        let x_short = if y < y1 {
+            if (y1 - y0) < 0.5 { x0.min(x1) }
+            else { x0 + (y - y0) / (y1 - y0) * (x1 - x0) }
+        } else {
+            if (y2 - y1) < 0.5 { x1.max(x2) }
+            else { x1 + (y - y1) / (y2 - y1) * (x2 - x1) }
+        };
+        let x_left = x_long.min(x_short);
+        let x_right = x_long.max(x_short);
+        let lx = (x_left + 0.5).floor().max(0.0) as u32;
+        let rx = (x_right - 0.5).floor().min((pw - 1) as f32) as u32;
+        if a == 0xff {
+            for px in lx..=rx {
+                let i = (py as usize * pw as usize + px as usize) * 4;
+                data[i] = c[0]; data[i+1] = c[1]; data[i+2] = c[2]; data[i+3] = 0xff;
+            }
+        } else {
+            let a32 = a as u32;
+            let inv = 255 - a32;
+            for px in lx..=rx {
+                let i = (py as usize * pw as usize + px as usize) * 4;
+                data[i]     = ((c[0] as u32 * a32 + data[i] as u32 * inv) / 255) as u8;
+                data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
+                data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
+                data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
+            }
         }
     }
 }

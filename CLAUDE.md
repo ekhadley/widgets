@@ -43,6 +43,8 @@ Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `So
 
 `render_text()` wraps cosmic-text buffer creation and glyph blitting. Key detail: the `(x, y)` offset passed to `glyph.physical()` must include `run.line_y` (which contains the font's ascent offset). Without it, all text renders ~20-25px too high. The correct call is `glyph.physical((x, y + run.line_y), 1.0)`.
 
+`fill_triangle()` is a general-purpose scanline triangle rasterizer taking 3 float vertices, color, alpha, and y-clip range. Uses pixel-center sampling for both x and y to avoid off-by-one stray pixels. Used for bevelled volume bar endpoints and available for future decorative geometry.
+
 ## Widgets
 
 ### wallrun
@@ -99,7 +101,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
 - State persists to `~/.local/state/widgets/raven.toml` (timers + weather cache survive close/reopen)
-- Volume bar (0-200%) via `wpctl`, scroll to adjust
+- Volume bar (0-200%) via `wpctl`, scroll to adjust, bevelled top/bottom (45° points via `fill_triangle`)
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
 - Day/night toggle via `dim_toggle.sh`
 - 14 color dots from walrs palette (7×2 grid)
@@ -110,7 +112,8 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
 - `App::handle_click()` / `App::handle_scroll()` / `App::handle_right_click()` / `App::hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
 - Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for 8 tiles: toggle, dots, clock, weather, timer1, timer2, volume, audio
-- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`. Raven is 410×230.
+- Layout: top center row split 2/3 clock | 1/3 empty tile; bottom center row split 2/5 weather | 3/5 timers (horizontally flipped from top). 20px bevelled corners with border on all 4 outside corners.
+- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`, `CORNER_BEVEL`. Raven is 410×230.
 - Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
 - calloop `Timer` fires every 100ms for clock/timer/weather redraws
