@@ -346,7 +346,8 @@ const AUDIO_REFRESH_COOLDOWN: u64 = 1;
 
 // Audio icon
 const AUDIO_ICON_NUDGE: f32 = -0.1;
-const CORNER_BEVEL: u32 = 20;
+const CORNER_BEVEL: u32 = 10;
+const BRANCH_LEN: u32 = 10;
 
 // --- Tile geometry ---
 
@@ -523,19 +524,85 @@ impl App {
         fill_rect(pixmap.data_mut(), pw, ph, 0, 0, OUTER, self.height, border);
         fill_rect(pixmap.data_mut(), pw, ph, self.width - OUTER, 0, OUTER, self.height, border);
 
-        // Column dividers (full height)
-        fill_rect(pixmap.data_mut(), pw, ph, OUTER + LEFT_W, OUTER, INNER, interior_h, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, lay.volume.x - INNER, OUTER, INNER, interior_h, divider);
+        let ch_y = lay.clock.y + lay.clock.h;
+        let b = BRANCH_LEN;
+        let lv_x = OUTER + LEFT_W;
+        let rv_x = lay.volume.x - INNER;
+        let int_bot = OUTER + interior_h; // y of first bottom-border pixel
 
-        // Per-column horizontal dividers (each only spans its column)
-        fill_rect(pixmap.data_mut(), pw, ph, OUTER, lay.toggle.y + lay.toggle.h, LEFT_W, INNER, divider);
-        let center_w = self.width - 2 * OUTER - LEFT_W - RIGHT_W - 2 * INNER;
-        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x, lay.clock.y + lay.clock.h, center_w, INNER, divider);
+        // --- J1: Toggle/Dots horizontal branches into left vertical ---
+        let j1_fy = (lay.toggle.y + lay.toggle.h) as i32;
+        let j1_fx = (lv_x - b + 1) as i32;
+        // Trunk with border bend at left end (down)
+        fill_rect(pixmap.data_mut(), pw, ph, OUTER + b, j1_fy as u32, j1_fx as u32 - OUTER - b, INNER, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, (OUTER + b - 1) as i32, j1_fy, -1, 1, b, divider);
+        // Right end Y-branches into left vertical
+        draw_line_45(pixmap.data_mut(), pw, ph, j1_fx, j1_fy, 1, -1, b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j1_fx, j1_fy, 1, 1, b, divider);
 
-        // Top: vertical divider between clock and empty tile
-        fill_rect(pixmap.data_mut(), pw, ph, lay.clock.x + lay.clock.w, OUTER, INNER, CLOCK_H, divider);
-        // Bottom: vertical divider between weather and timers
-        fill_rect(pixmap.data_mut(), pw, ph, lay.weather.x + lay.weather.w, lay.weather.y, INNER, lay.weather.h, divider);
+        // --- J2: Center horizontal left end branches into left vertical ---
+        let j2_fx = (lv_x + b - 1) as i32;
+        let j2_fy = ch_y as i32;
+        draw_line_45(pixmap.data_mut(), pw, ph, j2_fx, j2_fy, -1, -1, b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j2_fx, j2_fy, -1, 1, b, divider);
+
+        // --- J3: Center horizontal right end branches into right vertical ---
+        let j3_fx = (rv_x - b + 1) as i32;
+        let j3_fy = ch_y as i32;
+        draw_line_45(pixmap.data_mut(), pw, ph, j3_fx, j3_fy, 1, -1, b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j3_fx, j3_fy, 1, 1, b, divider);
+
+        // --- J4: Clock/Empty vertical branches into center horizontal ---
+        let j4_fx = (lay.clock.x + lay.clock.w) as i32;
+        let j4_fy = (ch_y - b + 1) as i32;
+        // Trunk with border bend at top (left)
+        fill_rect(pixmap.data_mut(), pw, ph, j4_fx as u32, OUTER + b, INNER, j4_fy as u32 - OUTER - b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, (OUTER + b - 1) as i32, -1, -1, b, divider);
+        // Bottom Y-branches into center horizontal
+        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, j4_fy, -1, 1, b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, j4_fy, 1, 1, b, divider);
+
+        // --- J5: Weather/Timers vertical branches into center horizontal ---
+        let j5_fx = (lay.weather.x + lay.weather.w) as i32;
+        let j5_fy = (ch_y + b - 1) as i32;
+        let j5_trunk_y = j5_fy as u32 + 1;
+        let j5_trunk_end = lay.weather.y + lay.weather.h;
+        // Trunk with border bend at bottom (right)
+        fill_rect(pixmap.data_mut(), pw, ph, j5_fx as u32, j5_trunk_y, INNER, j5_trunk_end - b - j5_trunk_y, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, (j5_trunk_end - b) as i32, 1, 1, b, divider);
+        // Top Y-branches into center horizontal
+        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, j5_fy, -1, -1, b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, j5_fy, 1, -1, b, divider);
+
+        // --- Left vertical (gapped for J1/J2, border bends top-right / bottom-left) ---
+        let j1_gap_top = j1_fy as u32 - (b - 1);
+        let j1_gap_bot = j1_fy as u32 + (b - 1);
+        let j2_gap_top = ch_y - (b - 1);
+        let j2_gap_bot = ch_y + (b - 1);
+        fill_rect(pixmap.data_mut(), pw, ph, lv_x, OUTER + b, INNER, j1_gap_top - OUTER - b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, lv_x as i32, (OUTER + b - 1) as i32, 1, -1, b, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, lv_x, j1_gap_bot + 1, INNER, j2_gap_top - j1_gap_bot - 1, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, lv_x, j2_gap_bot + 1, INNER, int_bot - b - j2_gap_bot - 1, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, lv_x as i32, (int_bot - b) as i32, -1, 1, b, divider);
+
+        // --- Right vertical (gapped for J3, border bends top-left / bottom-right) ---
+        let j3_gap_top = ch_y - (b - 1);
+        let j3_gap_bot = ch_y + (b - 1);
+        fill_rect(pixmap.data_mut(), pw, ph, rv_x, OUTER + b, INNER, j3_gap_top - OUTER - b, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, rv_x as i32, (OUTER + b - 1) as i32, 1, -1, b, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, rv_x, j3_gap_bot + 1, INNER, int_bot - b - j3_gap_bot - 1, divider);
+        draw_line_45(pixmap.data_mut(), pw, ph, rv_x as i32, (int_bot - b) as i32, 1, 1, b, divider);
+
+        // --- Center horizontal (gapped for J4/J5, shortened for J2/J3) ---
+        let ch_start = j2_fx as u32 + 1;
+        let ch_end = j3_fx as u32 - 1;
+        let j5_gl = j5_fx as u32 - (b - 1);
+        let j5_gr = j5_fx as u32 + (b - 1);
+        let j4_gl = j4_fx as u32 - (b - 1);
+        let j4_gr = j4_fx as u32 + (b - 1);
+        fill_rect(pixmap.data_mut(), pw, ph, ch_start, ch_y, j5_gl - ch_start, INNER, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, j5_gr + 1, ch_y, j4_gl - j5_gr - 1, INNER, divider);
+        fill_rect(pixmap.data_mut(), pw, ph, j4_gr + 1, ch_y, ch_end - j4_gr, INNER, divider);
 
 
         let fa = &self.icon_family;
@@ -967,6 +1034,17 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
             data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
             data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
             data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
+        }
+    }
+}
+
+fn draw_line_45(data: &mut [u8], pw: u32, ph: u32, x0: i32, y0: i32, dx: i32, dy: i32, len: u32, c: [u8; 3]) {
+    for i in 0..len as i32 {
+        let px = x0 + dx * i;
+        let py = y0 + dy * i;
+        if px >= 0 && (px as u32) < pw && py >= 0 && (py as u32) < ph {
+            let idx = (py as usize * pw as usize + px as usize) * 4;
+            data[idx] = c[0]; data[idx+1] = c[1]; data[idx+2] = c[2]; data[idx+3] = 0xff;
         }
     }
 }
