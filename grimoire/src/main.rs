@@ -247,13 +247,22 @@ fn find_icon_path(name: &str) -> Option<PathBuf> {
         if p.exists() { return Some(p); }
         return None;
     }
-    let sizes = ["48x48", "64x64", "32x32", "128x128", "256x256"];
-    for size in &sizes {
-        let p = PathBuf::from(format!("/usr/share/icons/hicolor/{size}/apps/{name}.png"));
-        if p.exists() { return Some(p); }
+    let home = std::env::var("HOME").unwrap();
+    let bases = [
+        format!("{home}/.local/share/icons/hicolor"),
+        "/usr/share/icons/hicolor".into(),
+    ];
+    let sizes = ["48x48", "64x64", "32x32", "128x128", "256x256", "512x512"];
+    for base in &bases {
+        for size in &sizes {
+            let p = PathBuf::from(format!("{base}/{size}/apps/{name}.png"));
+            if p.exists() { return Some(p); }
+        }
+        for dir in ["scalable", "symbolic"] {
+            let p = PathBuf::from(format!("{base}/{dir}/apps/{name}.svg"));
+            if p.exists() { return Some(p); }
+        }
     }
-    let svg = PathBuf::from(format!("/usr/share/icons/hicolor/scalable/apps/{name}.svg"));
-    if svg.exists() { return Some(svg); }
     for ext in ["png", "svg"] {
         let p = PathBuf::from(format!("/usr/share/pixmaps/{name}.{ext}"));
         if p.exists() { return Some(p); }

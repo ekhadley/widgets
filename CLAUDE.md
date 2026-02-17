@@ -158,7 +158,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 - Configurable multi-column grid layout (items flow left-to-right, top-to-bottom, centered when fewer items than columns)
 - Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete)
 - Mouse input (click to select, hover to highlight, scroll wheel)
-- Icon support: PNG and SVG via hicolor theme + /usr/share/pixmaps, cached to `~/.cache/thumbnails/grimoire/`
+- Icon support: PNG and SVG via hicolor theme (both `/usr/share/icons/hicolor/` and `~/.local/share/icons/hicolor/`, including `scalable/` and `symbolic/` SVG dirs, sizes up to 512x512) + `/usr/share/pixmaps`, cached to `~/.cache/thumbnails/grimoire/`. Does NOT do full icon theme lookup (Adwaita, breeze, etc.) — apps using generic themed icon names (e.g. `network-wired`, `preferences-system-network`) won't resolve.
 - .desktop file parsing with field code stripping, Terminal=true support, NoDisplay/Hidden filtering
 - Comment text displayed next to app name in dimmer color
 - Frecency sorting — tracks launch counts and timestamps in `~/.local/state/widgets/grimoire.toml`, scores by `count / (1 + hours_since_last / 72)`, falls back to alphabetical
