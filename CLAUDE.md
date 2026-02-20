@@ -12,10 +12,10 @@ The project is a Cargo workspace. A single top-level Makefile builds and install
 
 ```
 make install          # build + install all widgets
-make install W=raven  # build + install just raven
+make install W=wavedash  # build + install just wavedash
 ```
 
-Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates `raven_toggle` (a shell script that toggles raven on/off via `pkill -x raven || raven &`).
+Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates `wavedash_toggle` (a shell script that toggles wavedash on/off via `pkill -x wavedash || wavedash &`).
 
 `bench.sh` measures startup latency (time until process enters epoll_wait sleep state) over 1000 runs. Usage: `./bench.sh <widget> [args...]`.
 
@@ -46,7 +46,7 @@ All widgets follow the same architecture:
 
 ## cosmic-text rendering
 
-Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (raven also has `icon_font` for Font Awesome). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
+Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (wavedash also has `icon_font` for Font Awesome). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
 
 Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `Source::Binary` (i.e. via `load_font_data(Vec<u8>)`, not `load_font_file(path)`).
 
@@ -95,13 +95,13 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 **Color keys:** `background`, `background_opacity`, `bar_bg`, `bar_border`, `text`, `text_placeholder`, `label`, `selection`, `selection_opacity`
 
-### raven
+### wavedash
 
 Floating overlay for Hyprland — clock, weather, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
-**Build:** `make install W=raven` installs `raven` and `raven_toggle` to `~/.local/bin/`. `raven_toggle` launches raven or kills existing instance.
+**Build:** `make install W=wavedash` installs `wavedash` and `wavedash_toggle` to `~/.local/bin/`. `wavedash_toggle` launches wavedash or kills existing instance.
 
 Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`).
 
@@ -109,7 +109,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - Clock (HH:MM:SS + "Month Day"), updates every second via calloop timer
 - Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
-- State persists to `~/.local/state/widgets/raven.toml` (timers + weather cache survive close/reopen)
+- State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
 - Volume bar (0-200%) via `wpctl`, scroll to adjust, bevelled top/bottom (45° points via `fill_triangle`)
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
 - Day/night toggle via `dim_toggle.sh`
@@ -122,14 +122,14 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - `App::handle_click()` / `App::handle_scroll()` / `App::handle_right_click()` / `App::hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
 - Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for 8 tiles: toggle, dots, clock, weather, timer1, timer2, volume, audio
 - Layout: top center row split 2/3 clock | 1/3 empty tile; bottom center row split 2/5 weather | 3/5 timers (horizontally flipped from top). 20px bevelled corners with border on all 4 outside corners.
-- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`, `CORNER_BEVEL`. Raven is 410×230.
+- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`, `CORNER_BEVEL`. Wavedash is 410×230.
 - Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
 - calloop `Timer` fires every 100ms for clock/timer/weather redraws
 
-**Config** — `~/.config/widgets/raven.toml` (all optional):
+**Config** — `~/.config/widgets/wavedash.toml` (all optional):
 ```toml
-color_file = "~/.cache/wal/colors-raven.toml"
+color_file = "~/.cache/wal/colors-wavedash.toml"
 font = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"
 icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
 font_size = 39.0
@@ -188,6 +188,13 @@ search_comments = false
 
 **Color keys:** `background`, `background_opacity`, `border`, `bar_bg`, `bar_border`, `text`, `text_comment`, `text_placeholder`, `selection`, `selection_opacity`
 
+## External scripts
+
+Scripts in `../scripts/` that use these widgets:
+
+- **`paper`** — wallpaper setter. `paper --launcher` invokes `wallrun` to pick an image from `$WALLPAPER_DIR` (default `~/wallpapers`), then sets it via `hyprctl hyprpaper wallpaper`, updates `~/.config/hypr/hyprpaper.conf` for persistence, and runs `walrs` to regenerate the colorscheme. Also accepts a path directly (`paper /path/to/image`).
+- **`tome`** — PDF launcher. `tome --library` pipes `find ~/books -name '*.pdf'` into `grimoire --dmenu` to pick a PDF, then opens it in zathura. Also accepts a path directly (`tome file.pdf`).
+
 ## Ideas
 
 - **sysinfo** — neofetch/fastfetch-style system info overlay (host, kernel, CPU, RAM, GPU, uptime, packages, etc). Static snapshot on launch, not live monitoring.
@@ -203,8 +210,10 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - **blueman** — Bluetooth manager. Scans/pairs/connects/disconnects devices via `bluetoothctl` or D-Bus. Shows device list with connection state, battery level where available. Quick-switch between paired audio devices.
 
 ## Todo
+### grimoire
+- make control backspace delete the entire current search
 
-### raven
+### wavedash
 - pausing a timer that is negative sets it to 0:00
 - Timer alert — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - Network tile — wifi SSID + signal strength or ethernet indicator

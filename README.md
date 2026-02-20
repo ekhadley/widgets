@@ -4,10 +4,10 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 
 ## Widgets
 
-### raven
+### wavedash
 Floating status overlay — clock, weather, pomodoro timers, volume control, theme toggle.
 
-![raven](screenshots/raven.png)
+![wavedash](screenshots/wavedash.png)
 
 ### wallrun
 Image picker overlay — thumbnail grid, fuzzy search, keyboard + mouse nav.
@@ -32,7 +32,7 @@ Cargo workspace with a unified Makefile:
 
 ```
 make install          # build + install all widgets to ~/.local/bin/
-make install W=raven  # build + install just one
+make install W=wavedash  # build + install just one
 ```
 
 ## Config

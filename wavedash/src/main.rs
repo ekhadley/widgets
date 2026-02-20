@@ -52,7 +52,7 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            color_file: Some("~/.cache/wal/colors-raven.toml".into()),
+            color_file: Some("~/.cache/wal/colors-wavedash.toml".into()),
             font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
             font_size: 39.0,
@@ -67,11 +67,11 @@ impl Default for Config {
 }
 
 fn load_config() -> Config {
-    let path = config_dir().join("raven.toml");
+    let path = config_dir().join("wavedash.toml");
     match std::fs::read_to_string(&path) {
         Ok(s) => match toml::from_str(&s) {
             Ok(cfg) => cfg,
-            Err(e) => { eprintln!("raven: failed to parse {}: {e}", path.display()); Config::default() }
+            Err(e) => { eprintln!("wavedash: failed to parse {}: {e}", path.display()); Config::default() }
         }
         Err(_) => Config::default(),
     }
@@ -203,7 +203,7 @@ fn state_path() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    base.join("widgets/raven.toml")
+    base.join("widgets/wavedash.toml")
 }
 
 fn load_state(cfg: &Config) -> State {
@@ -364,6 +364,7 @@ struct Layout {
     toggle: Rect,
     dots: Rect,
     clock: Rect,
+    notif: Rect,
     weather: Rect,
     timer1: Rect,
     timer2: Rect,
@@ -388,6 +389,7 @@ fn layout(w: u32, h: u32) -> Layout {
         toggle: Rect { x: OUTER, y: OUTER, w: LEFT_W, h: TOGGLE_H },
         dots: Rect { x: OUTER, y: OUTER + TOGGLE_H + INNER, w: LEFT_W, h: interior_h - TOGGLE_H - INNER },
         clock: Rect { x: center_x, y: OUTER, w: clock_w, h: CLOCK_H },
+        notif: Rect { x: center_x + clock_w + INNER, y: OUTER, w: center_w - clock_w - INNER, h: CLOCK_H },
         weather: Rect { x: center_x, y: timer_y, w: weather_w, h: timer_h },
         timer2: Rect { x: timer_x, y: timer_y + TIMER_PAD, w: timer_w, h: timer_half - TIMER_PAD },
         timer1: Rect { x: timer_x, y: timer_y + timer_half, w: timer_w, h: timer_h - timer_half - TIMER_PAD },
@@ -408,7 +410,7 @@ fn center_y(area_y: f32, area_h: f32, font_size: f32, nudge: f32) -> f32 {
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Toggle, Timer1, Timer2, Audio }
+enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Audio }
 
 // --- App ---
 
@@ -458,6 +460,8 @@ struct App {
     weather_is_day: bool,
     weather_fetched: u64,
     weather_fetch: Option<Child>,
+    // Notifications
+    notif_paused: bool,
 }
 
 impl App {
@@ -669,6 +673,17 @@ impl App {
             DATE_SIZE, lay.clock.w as f32, lay.clock.h as f32, alpha_color(c.clock, 0.6),
             &self.font_family, Weight::BOLD);
 
+        // --- Notif tile (top-center right 1/3) ---
+        let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" }; // bell-slash / bell
+        let notif_color = alpha_color(c.ui, if self.hover == HoverTile::Notif { 1.0 } else { HOVER_OPACITY_DEFAULT });
+        let notif_w = measure_text(&mut self.font_system, notif_icon, ICON_SIZE, fa, Weight::BLACK);
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            notif_icon,
+            center_x(lay.notif.x as f32, lay.notif.w as f32, notif_w),
+            center_y(lay.notif.y as f32, lay.notif.h as f32, ICON_SIZE, 0.0),
+            ICON_SIZE, lay.notif.w as f32, lay.notif.h as f32, notif_color,
+            fa, Weight::BLACK);
+
         // --- Weather tile (bottom-left of center) ---
         let wr = lay.weather;
         if self.weather_fetched > 0 {
@@ -836,6 +851,13 @@ impl App {
             return;
         }
 
+        if lay.notif.contains(mx, my) {
+            Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
+            self.notif_paused = !self.notif_paused;
+            self.draw();
+            return;
+        }
+
         if lay.timer1.contains(mx, my) {
             if self.timer1_started > 0 {
                 let rem = timer_remaining(self.timer1_duration, self.timer1_started);
@@ -926,6 +948,7 @@ impl App {
         let lay = layout(self.width, self.height);
 
         if lay.toggle.contains(mx, my) { return HoverTile::Toggle; }
+        if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
         if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
         if lay.audio.contains(mx, my) { return HoverTile::Audio; }
@@ -1255,6 +1278,9 @@ fn main() {
         None
     };
 
+    let notif_paused = Command::new("dunstctl").arg("is-paused").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true").unwrap_or(false);
+
     let (volume, muted) = get_volume();
     let headphones = is_headphones();
 
@@ -1272,7 +1298,7 @@ fn main() {
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("raven"), None);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("wavedash"), None);
     layer.set_size(WIDTH, HEIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.wl_surface().commit();
@@ -1331,6 +1357,7 @@ fn main() {
         weather_is_day: st.weather_is_day,
         weather_fetched: st.weather_fetched,
         weather_fetch,
+        notif_paused,
     };
 
     // 1-second timer for clock/timer redraws
