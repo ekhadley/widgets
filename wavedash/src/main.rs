@@ -106,7 +106,10 @@ struct Colors {
     sun: [u8; 3],
     clock: [u8; 3],
     weather: [u8; 3],
-    ui: [u8; 3],
+    audio: [u8; 3],
+    volume: [u8; 3],
+    notif: [u8; 3],
+    timer: [u8; 3],
     dots: [[u8; 3]; 16],
 }
 
@@ -120,7 +123,10 @@ impl Default for Colors {
             sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
             weather: [0x94, 0xe2, 0xd5],
-            ui: [0xcb, 0xa6, 0xf7],
+            audio: [0xcb, 0xa6, 0xf7],
+            volume: [0xcb, 0xa6, 0xf7],
+            notif: [0xcb, 0xa6, 0xf7],
+            timer: [0xcb, 0xa6, 0xf7],
             dots: [
                 [0xcd, 0xd6, 0xf4], // foreground
                 [0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa],
@@ -164,7 +170,10 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
                             "weather" => colors.weather = c,
-                            "ui" => colors.ui = c,
+                            "audio" => colors.audio = c,
+                            "volume" => colors.volume = c,
+                            "notif" => colors.notif = c,
+                            "timer" => colors.timer = c,
                             "foreground" => colors.dots[0] = c,
                             _ => {
                                 if let Some(n) = key.strip_prefix("color") {
@@ -301,53 +310,35 @@ fn switch_audio(target_mac: &str) {
 
 // --- Layout constants ---
 
-const WIDTH: u32 = 410;
-const HEIGHT: u32 = 230;
-const OUTER: u32 = 3;   // outer border thickness
-const INNER: u32 = 1;   // inner divider thickness
-const LEFT_W: u32 = 58;
-const RIGHT_W: u32 = 58;
-const TOGGLE_H: u32 = 48;  // left column split
-const CLOCK_H: u32 = 110;  // center column split
-const AUDIO_H: u32 = 55;
+const WIDTH: u32 = 440;
+const HEIGHT: u32 = 235;
+const ACCENT_W: u32 = 4;
+const LEFT_MARGIN: f32 = ACCENT_W as f32 + 10.0;
 
-// Font/text sizes
-const ICON_SIZE: f32 = 32.0;
-const DOT_SIZE: f32 = 28.0;
-const DATE_SIZE: f32 = 23.0;
-const TIMER_SIZE: f32 = 27.0;
+// Type scale
+const CLOCK_HM_SIZE: f32 = 52.0;
+const DATE_SIZE: f32 = 14.0;
+const WEATHER_ICON_SIZE: f32 = 23.0;
+const WEATHER_TEMP_SIZE: f32 = 36.0;
+const WEATHER_FEELS_SIZE: f32 = 18.0;
+const TIMER_SIZE: f32 = 32.0;
+const UTIL_ICON_SIZE: f32 = 21.0;
+const VOL_BAR_SIZE: f32 = 21.0;
 const LINE_HEIGHT: f32 = 1.2;
-const CLOCK_DATE_GAP: f32 = 2.0;
 
 // Hover
 const HOVER_OPACITY_DEFAULT: f32 = 0.7;
 
 // Volume
-const VOL_BAR_PAD: u32 = 8;
-const VOL_BAR_W: u32 = 12;
-const VOL_BG_ALPHA: f32 = 0.45;
-const VOL_BEVEL_H: u32 = 6; // (VOL_BAR_W/2) * tan(45°)
 const VOL_SCROLL_STEP: f32 = 0.05;
 const VOL_MAX: f32 = 2.0;
 
 // Timers
 const TIMER_SCROLL_STEP: i64 = 60;
-const TIMER_PAD: u32 = 8;
-// Timers
-const INACTIVE_ALPHA: f32 = 0.8;
-
-// Weather
-const WEATHER_ICON_SIZE: f32 = 34.0;
-const WEATHER_TEMP_SIZE: f32 = 17.0;
 
 // Timing
 const TICK_MS: u64 = 100;
 const AUDIO_REFRESH_COOLDOWN: u64 = 1;
-
-// Audio icon
-const AUDIO_ICON_NUDGE: f32 = -0.1;
-const CORNER_BEVEL: u32 = 10;
-const BRANCH_LEN: u32 = 10;
 
 // --- Tile geometry ---
 
@@ -362,7 +353,6 @@ impl Rect {
 
 struct Layout {
     toggle: Rect,
-    dots: Rect,
     clock: Rect,
     notif: Rect,
     weather: Rect,
@@ -373,44 +363,34 @@ struct Layout {
 }
 
 fn layout(w: u32, h: u32) -> Layout {
-    let interior_w = w - 2 * OUTER;
-    let interior_h = h - 2 * OUTER;
-    let center_x = OUTER + LEFT_W + INNER;
-    let center_w = interior_w - LEFT_W - RIGHT_W - 2 * INNER;
-    let right_x = w - OUTER - RIGHT_W;
-    let timer_y = OUTER + CLOCK_H + INNER;
-    let timer_h = interior_h - CLOCK_H - INNER;
-    let timer_half = timer_h / 2;
-    let clock_w = center_w * 2 / 3;
-    let weather_w = center_w * 2 / 5;
-    let timer_w = center_w - weather_w - INNER;
-    let timer_x = center_x + weather_w + INNER;
+    let lm = LEFT_MARGIN as u32;
+    let right = w - lm;
+    // Top band: clock (left) + weather (right)
+    let top_y: u32 = 8;
+    let top_h: u32 = 78;
+    // Bottom section: 3 rows — icons stacked left, timers stacked right
+    let sec_y: u32 = 95;
+    let sec_h = h - sec_y;
+    let row_h = sec_h / 3;
+    let r0 = sec_y;
+    let r1 = sec_y + row_h;
+    let r2 = sec_y + row_h * 2;
     Layout {
-        toggle: Rect { x: OUTER, y: OUTER, w: LEFT_W, h: TOGGLE_H },
-        dots: Rect { x: OUTER, y: OUTER + TOGGLE_H + INNER, w: LEFT_W, h: interior_h - TOGGLE_H - INNER },
-        clock: Rect { x: center_x, y: OUTER, w: clock_w, h: CLOCK_H },
-        notif: Rect { x: center_x + clock_w + INNER, y: OUTER, w: center_w - clock_w - INNER, h: CLOCK_H },
-        weather: Rect { x: center_x, y: timer_y, w: weather_w, h: timer_h },
-        timer2: Rect { x: timer_x, y: timer_y + TIMER_PAD, w: timer_w, h: timer_half - TIMER_PAD },
-        timer1: Rect { x: timer_x, y: timer_y + timer_half, w: timer_w, h: timer_h - timer_half - TIMER_PAD },
-        volume: Rect { x: right_x, y: OUTER, w: RIGHT_W, h: interior_h - AUDIO_H },
-        audio: Rect { x: right_x, y: h - OUTER - AUDIO_H, w: RIGHT_W, h: AUDIO_H },
+        clock: Rect { x: lm, y: top_y, w: 240, h: top_h },
+        weather: Rect { x: right - 160, y: top_y, w: 160, h: top_h },
+        toggle: Rect { x: lm, y: r0, w: 32, h: row_h },
+        notif: Rect { x: lm, y: r1, w: 32, h: row_h },
+        audio: Rect { x: lm, y: r2, w: 32, h: row_h },
+        volume: Rect { x: lm + 36, y: r2, w: 200, h: row_h },
+        timer2: Rect { x: right - 120, y: r1, w: 120, h: row_h },
+        timer1: Rect { x: right - 120, y: r2, w: 120, h: row_h },
     }
-}
-
-fn center_x(area_x: f32, area_w: f32, text_w: f32) -> f32 {
-    area_x + (area_w - text_w) / 2.0
-}
-
-// nudge: usually 0.0; positive pushes down
-fn center_y(area_y: f32, area_h: f32, font_size: f32, nudge: f32) -> f32 {
-    area_y + (area_h - font_size * LINE_HEIGHT) / 2.0 + font_size * nudge
 }
 
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Audio }
+enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Volume, Audio }
 
 // --- App ---
 
@@ -429,7 +409,6 @@ struct App {
     font_system: FontSystem,
     swash_cache: SwashCache,
     colors: Colors,
-    font_size: f32,
     font_family: String,
     icon_family: String,
     // Timer state
@@ -450,8 +429,6 @@ struct App {
     // Base durations for reset (scroll-adjusted)
     timer1_base: i64,
     timer2_base: i64,
-    // Volume drag
-    dragging_volume: bool,
     volume_set_at: u64,
     // Weather
     weather_temp: f64,
@@ -481,14 +458,6 @@ impl App {
         }
     }
 
-    fn volume_from_y(&self, y: f64) -> f32 {
-        let lay = layout(self.width, self.height);
-        let vol_bar_top = lay.volume.y + VOL_BAR_PAD;
-        let vol_bar_h = lay.volume.h - 2 * VOL_BAR_PAD;
-        let frac = 1.0 - (y as f32 - vol_bar_top as f32) / vol_bar_h as f32;
-        (frac * VOL_MAX).clamp(0.0, VOL_MAX)
-    }
-
     fn refresh_audio(&mut self) {
         let (v, m) = get_volume();
         self.volume = v;
@@ -500,8 +469,6 @@ impl App {
         let c = &self.colors;
         let bg = c.background;
         let bg_a = c.background_alpha;
-        let border = c.border;
-        let divider = c.divider;
         let lay = layout(self.width, self.height);
 
         let stride = self.width as i32 * 4;
@@ -515,304 +482,135 @@ impl App {
         let pw = pixmap.width();
         let ph = pixmap.height();
 
-        let interior_w = self.width - 2 * OUTER;
-        let interior_h = self.height - 2 * OUTER;
+        // Full-bleed background
+        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, self.width, self.height, bg, bg_a);
 
-        // Uniform background
-        fill_rect_alpha(pixmap.data_mut(), pw, ph,
-            OUTER, OUTER, interior_w, interior_h, bg, bg_a);
-
-        // Outer border (heavy)
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, self.width, OUTER, border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, self.height - OUTER, self.width, OUTER, border);
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, OUTER, self.height, border);
-        fill_rect(pixmap.data_mut(), pw, ph, self.width - OUTER, 0, OUTER, self.height, border);
-
-        let ch_y = lay.clock.y + lay.clock.h;
-        let b = BRANCH_LEN;
-        let lv_x = OUTER + LEFT_W;
-        let rv_x = lay.volume.x - INNER;
-        let int_bot = OUTER + interior_h; // y of first bottom-border pixel
-
-        // --- J1: Toggle/Dots horizontal branches into left vertical ---
-        let j1_fy = (lay.toggle.y + lay.toggle.h) as i32;
-        let j1_fx = (lv_x - b + 1) as i32;
-        // Trunk with border bend at left end (down)
-        fill_rect(pixmap.data_mut(), pw, ph, OUTER + b, j1_fy as u32, j1_fx as u32 - OUTER - b, INNER, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, (OUTER + b - 1) as i32, j1_fy, -1, 1, b, divider);
-        // Right end Y-branches into left vertical
-        draw_line_45(pixmap.data_mut(), pw, ph, j1_fx, j1_fy, 1, -1, b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j1_fx, j1_fy, 1, 1, b, divider);
-
-        // --- J2: Center horizontal left end branches into left vertical ---
-        let j2_fx = (lv_x + b - 1) as i32;
-        let j2_fy = ch_y as i32;
-        draw_line_45(pixmap.data_mut(), pw, ph, j2_fx, j2_fy, -1, -1, b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j2_fx, j2_fy, -1, 1, b, divider);
-
-        // --- J3: Center horizontal right end branches into right vertical ---
-        let j3_fx = (rv_x - b + 1) as i32;
-        let j3_fy = ch_y as i32;
-        draw_line_45(pixmap.data_mut(), pw, ph, j3_fx, j3_fy, 1, -1, b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j3_fx, j3_fy, 1, 1, b, divider);
-
-        // --- J4: Clock/Empty vertical branches into center horizontal ---
-        let j4_fx = (lay.clock.x + lay.clock.w) as i32;
-        let j4_fy = (ch_y - b + 1) as i32;
-        // Trunk with border bend at top (left)
-        fill_rect(pixmap.data_mut(), pw, ph, j4_fx as u32, OUTER + b, INNER, j4_fy as u32 - OUTER - b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, (OUTER + b - 1) as i32, -1, -1, b, divider);
-        // Bottom Y-branches into center horizontal
-        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, j4_fy, -1, 1, b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j4_fx, j4_fy, 1, 1, b, divider);
-
-        // --- J5: Weather/Timers vertical branches into center horizontal ---
-        let j5_fx = (lay.weather.x + lay.weather.w) as i32;
-        let j5_fy = (ch_y + b - 1) as i32;
-        let j5_trunk_y = j5_fy as u32 + 1;
-        let j5_trunk_end = lay.weather.y + lay.weather.h;
-        // Trunk with border bend at bottom (right)
-        fill_rect(pixmap.data_mut(), pw, ph, j5_fx as u32, j5_trunk_y, INNER, j5_trunk_end - b - j5_trunk_y, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, (j5_trunk_end - b) as i32, 1, 1, b, divider);
-        // Top Y-branches into center horizontal
-        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, j5_fy, -1, -1, b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, j5_fx, j5_fy, 1, -1, b, divider);
-
-        // --- Left vertical (gapped for J1/J2, border bends top-right / bottom-left) ---
-        let j1_gap_top = j1_fy as u32 - (b - 1);
-        let j1_gap_bot = j1_fy as u32 + (b - 1);
-        let j2_gap_top = ch_y - (b - 1);
-        let j2_gap_bot = ch_y + (b - 1);
-        fill_rect(pixmap.data_mut(), pw, ph, lv_x, OUTER + b, INNER, j1_gap_top - OUTER - b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, lv_x as i32, (OUTER + b - 1) as i32, 1, -1, b, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, lv_x, j1_gap_bot + 1, INNER, j2_gap_top - j1_gap_bot - 1, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, lv_x, j2_gap_bot + 1, INNER, int_bot - b - j2_gap_bot - 1, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, lv_x as i32, (int_bot - b) as i32, -1, 1, b, divider);
-
-        // --- Right vertical (gapped for J3, border bends top-left / bottom-right) ---
-        let j3_gap_top = ch_y - (b - 1);
-        let j3_gap_bot = ch_y + (b - 1);
-        fill_rect(pixmap.data_mut(), pw, ph, rv_x, OUTER + b, INNER, j3_gap_top - OUTER - b, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, rv_x as i32, (OUTER + b - 1) as i32, 1, -1, b, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, rv_x, j3_gap_bot + 1, INNER, int_bot - b - j3_gap_bot - 1, divider);
-        draw_line_45(pixmap.data_mut(), pw, ph, rv_x as i32, (int_bot - b) as i32, 1, 1, b, divider);
-
-        // --- Center horizontal (gapped for J4/J5, shortened for J2/J3) ---
-        let ch_start = j2_fx as u32 + 1;
-        let ch_end = j3_fx as u32 - 1;
-        let j5_gl = j5_fx as u32 - (b - 1);
-        let j5_gr = j5_fx as u32 + (b - 1);
-        let j4_gl = j4_fx as u32 - (b - 1);
-        let j4_gr = j4_fx as u32 + (b - 1);
-        fill_rect(pixmap.data_mut(), pw, ph, ch_start, ch_y, j5_gl - ch_start, INNER, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, j5_gr + 1, ch_y, j4_gl - j5_gr - 1, INNER, divider);
-        fill_rect(pixmap.data_mut(), pw, ph, j4_gr + 1, ch_y, ch_end - j4_gr, INNER, divider);
-
+        // Accent bar (left edge, full height)
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.clock);
 
         let fa = &self.icon_family;
 
-        // --- Toggle tile (top-left) — tracks daylight from weather backend ---
-        let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" }; // sun / moon
-        let mut icon_color = if self.weather_is_day { c.sun } else { c.clock };
-        icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let icon_w = measure_text(&mut self.font_system, icon_char, ICON_SIZE, fa, Weight::BLACK);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            icon_char,
-            center_x(lay.toggle.x as f32, lay.toggle.w as f32, icon_w),
-            center_y(lay.toggle.y as f32, lay.toggle.h as f32, ICON_SIZE, 0.0),
-            ICON_SIZE, lay.toggle.w as f32, lay.toggle.h as f32, icon_color,
-            fa, Weight::BLACK);
-
-        // --- Dots tile (bottom-left, 7x2 grid, down-first) ---
-        // Order: foreground, color1..color6 down left col, color7..color13 down right col
-        let dot_char = "\u{25cf}";
-        let dot_rows: usize = 7;
-        let dot_cols: usize = 2;
-        let dot_pad_y: f32 = 5.0;
-        let dot_step_y = (lay.dots.h as f32 - 2.0 * dot_pad_y) / dot_rows as f32;
-        let dw = measure_text(&mut self.font_system, dot_char, DOT_SIZE, &self.font_family, Weight::BOLD);
-        let full_step_x = lay.dots.w as f32 / dot_cols as f32;
-        let dot_gap_x = (full_step_x - dw) / 3.0;
-        let dot_step_x = dw + dot_gap_x;
-        let grid_w = dot_step_x * dot_cols as f32;
-        let grid_x = lay.dots.x as f32 + (lay.dots.w as f32 - grid_w) / 2.0;
-        for i in 0..14 {
-            let col = i / dot_rows;
-            let row = i % dot_rows;
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                dot_char,
-                center_x(grid_x + col as f32 * dot_step_x, dot_step_x, dw),
-                center_y(lay.dots.y as f32 + dot_pad_y + row as f32 * dot_step_y, dot_step_y, DOT_SIZE, 0.0),
-                DOT_SIZE, dot_step_x, dot_step_y, c.dots[i],
-                &self.font_family, Weight::BOLD);
-        }
-
-        // --- Clock tile (top-center) ---
+        // --- Clock (top-left, hero) ---
         let now = chrono_now();
-        let time_str = format!("{:02}:{:02}:{:02}", now.0, now.1, now.2);
-        let time_size = self.font_size;
+        let hm_str = format!("{:02}:{:02}", now.0, now.1);
+        let clock_y = lay.clock.y as f32 + 4.0;
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            &hm_str, LEFT_MARGIN, clock_y,
+            CLOCK_HM_SIZE, lay.clock.w as f32, lay.clock.h as f32, c.clock,
+            &self.font_family, Weight::BOLD);
+
+        // Date below clock
         let date_str = format_date();
-        let time_line_h = time_size * LINE_HEIGHT;
-        let date_line_h = DATE_SIZE * LINE_HEIGHT;
-        let block_h = time_line_h + CLOCK_DATE_GAP + date_line_h;
-        let block_y = lay.clock.y as f32 + (lay.clock.h as f32 - block_h) / 2.0;
-
-        let time_w = measure_text(&mut self.font_system, &time_str, time_size, &self.font_family, Weight::BOLD);
+        let date_y = clock_y + CLOCK_HM_SIZE * LINE_HEIGHT + 2.0;
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &time_str,
-            center_x(lay.clock.x as f32, lay.clock.w as f32, time_w),
-            block_y,
-            time_size, lay.clock.w as f32, lay.clock.h as f32, c.clock,
+            &date_str, LEFT_MARGIN, date_y,
+            DATE_SIZE, lay.clock.w as f32, 30.0, alpha_color(c.clock, 0.75),
             &self.font_family, Weight::BOLD);
 
-        let date_w = measure_text(&mut self.font_system, &date_str, DATE_SIZE, &self.font_family, Weight::BOLD);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &date_str,
-            center_x(lay.clock.x as f32, lay.clock.w as f32, date_w),
-            block_y + time_line_h + CLOCK_DATE_GAP,
-            DATE_SIZE, lay.clock.w as f32, lay.clock.h as f32, alpha_color(c.clock, 0.6),
-            &self.font_family, Weight::BOLD);
-
-        // --- Notif tile (top-center right 1/3) ---
-        let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" }; // bell-slash / bell
-        let notif_color = alpha_color(c.ui, if self.hover == HoverTile::Notif { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let notif_w = measure_text(&mut self.font_system, notif_icon, ICON_SIZE, fa, Weight::BLACK);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            notif_icon,
-            center_x(lay.notif.x as f32, lay.notif.w as f32, notif_w),
-            center_y(lay.notif.y as f32, lay.notif.h as f32, ICON_SIZE, 0.0),
-            ICON_SIZE, lay.notif.w as f32, lay.notif.h as f32, notif_color,
-            fa, Weight::BLACK);
-
-        // --- Weather tile (bottom-left of center) ---
-        let wr = lay.weather;
+        // --- Weather (top-right) ---
         if self.weather_fetched > 0 {
             let icon = weather_icon(self.weather_code, self.weather_is_day);
+            let temp_str = format!("{:.0}°", self.weather_temp);
+            let feels_str = format!("{:.0}°", self.weather_feels);
             let icon_w = measure_text(&mut self.font_system, icon, WEATHER_ICON_SIZE, fa, Weight::NORMAL);
-            let icon_line_h = WEATHER_ICON_SIZE * LINE_HEIGHT;
-            let temp_line_h = WEATHER_TEMP_SIZE * LINE_HEIGHT;
-            let block_h = icon_line_h + CLOCK_DATE_GAP + temp_line_h;
-            let block_y = wr.y as f32 + (wr.h as f32 - block_h) / 2.0;
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                icon,
-                center_x(wr.x as f32, wr.w as f32, icon_w),
-                block_y,
-                WEATHER_ICON_SIZE, wr.w as f32, wr.h as f32, c.weather,
-                fa, Weight::NORMAL);
-            let temp_str = format!("{:.0}°({:.0}°)", self.weather_temp, self.weather_feels);
             let temp_w = measure_text(&mut self.font_system, &temp_str, WEATHER_TEMP_SIZE, &self.font_family, Weight::BOLD);
+            let gap = 6.0;
+            let block_w = icon_w + gap + temp_w;
+            let weather_right = (lay.weather.x + lay.weather.w) as f32;
+            let weather_x = weather_right - block_w;
+            let weather_y = lay.weather.y as f32 + 4.0;
+            let icon_y = weather_y + (WEATHER_TEMP_SIZE - WEATHER_ICON_SIZE) * 0.5;
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                &temp_str,
-                center_x(wr.x as f32, wr.w as f32, temp_w),
-                block_y + icon_line_h + CLOCK_DATE_GAP,
-                WEATHER_TEMP_SIZE, wr.w as f32, wr.h as f32, alpha_color(c.weather, 0.6),
+                icon, weather_x, icon_y,
+                WEATHER_ICON_SIZE, 50.0, 50.0, c.weather,
+                fa, Weight::NORMAL);
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                &temp_str, weather_x + icon_w + gap, weather_y,
+                WEATHER_TEMP_SIZE, 100.0, 50.0, c.weather,
+                &self.font_family, Weight::BOLD);
+            // Feels-like below, right-aligned
+            let feels_w = measure_text(&mut self.font_system, &feels_str, WEATHER_FEELS_SIZE, &self.font_family, Weight::BOLD);
+            let feels_x = weather_right - feels_w;
+            let feels_y = weather_y + WEATHER_TEMP_SIZE * LINE_HEIGHT + 2.0;
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                &feels_str, feels_x, feels_y,
+                WEATHER_FEELS_SIZE, 100.0, 30.0, alpha_color(c.weather, 0.5),
                 &self.font_family, Weight::BOLD);
         }
 
-        // --- Timer 1 tile (bottom-center-left) ---
-        let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
-        let t1_str = format_timer(t1_rem);
-        let mut t1_color = if self.timer1_started > 0 { c.ui }
-                          else { alpha_color(c.ui, INACTIVE_ALPHA) };
-        t1_color = alpha_color(t1_color, if self.hover == HoverTile::Timer1 { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
+        // --- Left icon column (toggle, notif, audio — stacked vertically) ---
+        let icon_x = lay.toggle.x as f32 + 2.0;
+
+        // Toggle icon (sun/moon, top)
+        let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
+        let mut icon_color = if self.weather_is_day { c.sun } else { c.clock };
+        icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &t1_str,
-            center_x(lay.timer1.x as f32, lay.timer1.w as f32, t1_w),
-            center_y(lay.timer1.y as f32, lay.timer1.h as f32, TIMER_SIZE, 0.0),
-            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, t1_color,
-            &self.font_family, Weight::BOLD);
-
-        // --- Timer 2 tile (bottom-center-right) ---
-        let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
-        let t2_str = format_timer(t2_rem);
-        let mut t2_color = if self.timer2_started > 0 { c.ui }
-                          else { alpha_color(c.ui, INACTIVE_ALPHA) };
-        t2_color = alpha_color(t2_color, if self.hover == HoverTile::Timer2 { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &t2_str,
-            center_x(lay.timer2.x as f32, lay.timer2.w as f32, t2_w),
-            center_y(lay.timer2.y as f32, lay.timer2.h as f32, TIMER_SIZE, 0.0),
-            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, t2_color,
-            &self.font_family, Weight::BOLD);
-
-        // --- Volume tile (right column, unified with audio) ---
-        let vol_bar_top = lay.volume.y + VOL_BAR_PAD;
-        let vol_bar_h = lay.volume.h - 2 * VOL_BAR_PAD;
-        let bar_x = lay.volume.x + (lay.volume.w - VOL_BAR_W) / 2;
-
-        let bevel = VOL_BEVEL_H as f32;
-        let bl = bar_x as f32;
-        let br = (bar_x + VOL_BAR_W) as f32;
-        let bcx = bl + VOL_BAR_W as f32 / 2.0;
-        let bt = vol_bar_top as f32;
-        let bb = (vol_bar_top + vol_bar_h) as f32;
-
-        let vol_bg_color = alpha_color(c.ui, VOL_BG_ALPHA);
-        fill_triangle(pixmap.data_mut(), pw, ph,
-            [(bcx, bt), (bl, bt + bevel), (br, bt + bevel)], vol_bg_color, 0xff, 0, ph);
-        fill_rect(pixmap.data_mut(), pw, ph,
-            bar_x, vol_bar_top + VOL_BEVEL_H, VOL_BAR_W, vol_bar_h - 2 * VOL_BEVEL_H, vol_bg_color);
-        fill_triangle(pixmap.data_mut(), pw, ph,
-            [(bl, bb - bevel), (br, bb - bevel), (bcx, bb)], vol_bg_color, 0xff, 0, ph);
-
-        let fill_frac = (self.volume / VOL_MAX).clamp(0.0, 1.0);
-        let fill_h = (vol_bar_h as f32 * fill_frac) as u32;
-        if fill_h > 0 {
-            let opacity = if self.muted { 0x4d } else { 0xff };
-            let fg_top = (vol_bar_top + vol_bar_h - fill_h) as f32;
-            // Foreground top bevel
-            fill_triangle(pixmap.data_mut(), pw, ph,
-                [(bcx, fg_top), (bl, fg_top + bevel), (br, fg_top + bevel)], c.ui, opacity, 0, ph);
-            // Foreground body
-            let body_top = vol_bar_top + vol_bar_h - fill_h + VOL_BEVEL_H;
-            let body_bot = vol_bar_top + vol_bar_h - VOL_BEVEL_H;
-            if body_bot > body_top {
-                fill_rect_alpha(pixmap.data_mut(), pw, ph,
-                    bar_x, body_top, VOL_BAR_W, body_bot - body_top, c.ui, opacity);
-            }
-            // Bottom bevel (follows overall bar shape)
-            fill_triangle(pixmap.data_mut(), pw, ph,
-                [(bl, bb - bevel), (br, bb - bevel), (bcx, bb)], c.ui, opacity, 0, ph);
-        }
-
-        // --- Audio tile (bottom-right) ---
-        let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
-        let mut ai_color = if self.muted { alpha_color(c.ui, VOL_BG_ALPHA) } else { c.ui };
-        ai_color = alpha_color(ai_color, if self.hover == HoverTile::Audio { 1.0 } else { HOVER_OPACITY_DEFAULT });
-        let ai_w = measure_text(&mut self.font_system, audio_icon, ICON_SIZE, fa, Weight::BLACK);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            audio_icon,
-            center_x(lay.audio.x as f32, lay.audio.w as f32, ai_w),
-            center_y(lay.audio.y as f32, lay.audio.h as f32, ICON_SIZE, AUDIO_ICON_NUDGE),
-            ICON_SIZE, lay.audio.w as f32, lay.audio.h as f32, ai_color,
+            icon_char, icon_x, lay.toggle.y as f32 + 6.0,
+            UTIL_ICON_SIZE, 30.0, 30.0, icon_color,
             fa, Weight::BLACK);
 
-        // Bevel outside corners with border
-        let diag_border = (OUTER as f32 * std::f32::consts::SQRT_2).ceil() as u32;
-        let cr = CORNER_BEVEL + diag_border;
-        let data = pixmap.data_mut();
-        for py in 0..cr.min(ph) {
-            for px in 0..cr.min(pw) {
-                let d = px + py;
-                if d >= cr { continue; }
-                let corners: [(usize, usize); 4] = [
-                    (px as usize, py as usize),
-                    ((pw - 1 - px) as usize, py as usize),
-                    (px as usize, (ph - 1 - py) as usize),
-                    ((pw - 1 - px) as usize, (ph - 1 - py) as usize),
-                ];
-                for (cx, cy) in corners {
-                    let i = (cy * pw as usize + cx) * 4;
-                    if d < CORNER_BEVEL {
-                        data[i] = 0; data[i+1] = 0; data[i+2] = 0; data[i+3] = 0;
-                    } else {
-                        data[i] = border[0]; data[i+1] = border[1]; data[i+2] = border[2]; data[i+3] = 0xff;
-                    }
-                }
-            }
+        // Notif icon (middle)
+        let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" };
+        let notif_color = alpha_color(c.notif, if self.hover == HoverTile::Notif { 1.0 } else { HOVER_OPACITY_DEFAULT });
+        let notif_w_on = measure_text(&mut self.font_system, "\u{f0f3}", UTIL_ICON_SIZE, fa, Weight::BLACK);
+        let notif_w_off = measure_text(&mut self.font_system, "\u{f1f6}", UTIL_ICON_SIZE, fa, Weight::BLACK);
+        let notif_w_cur = if self.notif_paused { notif_w_off } else { notif_w_on };
+        let notif_x = icon_x + (notif_w_on.max(notif_w_off) - notif_w_cur) / 2.0;
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            notif_icon, notif_x, lay.notif.y as f32 + 6.0,
+            UTIL_ICON_SIZE, 30.0, 30.0, notif_color,
+            fa, Weight::BLACK);
+
+        // Audio icon (bottom)
+        let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
+        let ai_alpha = if self.muted { 0.3 } else { 1.0 };
+        let ai_hover = if self.hover == HoverTile::Audio { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let ai_w = measure_text(&mut self.font_system, audio_icon, UTIL_ICON_SIZE, fa, Weight::BLACK);
+        let ai_x = lay.audio.x as f32 + (lay.audio.w as f32 - ai_w) / 2.0 - 2.0;
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            audio_icon, ai_x, lay.audio.y as f32 + 6.0,
+            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(c.audio, ai_alpha * ai_hover),
+            fa, Weight::BLACK);
+
+        // --- Volume bar (same row as audio) ---
+        let vol_steps: usize = 16;
+        let vol_pct = (self.volume / VOL_MAX * vol_steps as f32).round() as usize;
+        let filled_count = vol_pct.min(vol_steps);
+        let vol_hover = if self.hover == HoverTile::Volume { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let vol_alpha = if self.muted { 0.3 } else { 1.0 };
+        let vol_x = lay.volume.x as f32;
+        let block_w = measure_text(&mut self.font_system, "\u{2588}", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
+        let space_w = measure_text(&mut self.font_system, " ", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
+        let step = block_w + space_w * 0.25 - 1.0;
+        for i in 0..vol_steps {
+            let (ch, alpha) = if i < filled_count { ("\u{2588}", vol_alpha * vol_hover) } else { ("\u{2591}", 0.55 * vol_hover) };
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                ch, vol_x + i as f32 * step, lay.audio.y as f32 + 6.0,
+                VOL_BAR_SIZE, block_w + 1.0, 30.0, alpha_color(c.volume, alpha),
+                &self.font_family, Weight::BOLD);
         }
+
+        // --- Timers (bottom-right, stacked: short on top, long on bottom) ---
+        let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
+        let t2_str = format_timer(t2_rem);
+        let t2_alpha = if self.timer2_started > 0 { 1.0 } else { 0.7 };
+        let t2_hover = if self.hover == HoverTile::Timer2 { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            &t2_str, (lay.timer2.x + lay.timer2.w) as f32 - t2_w, lay.timer2.y as f32 + 6.0,
+            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, alpha_color(c.timer, t2_alpha * t2_hover),
+            &self.font_family, Weight::BOLD);
+
+        let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
+        let t1_str = format_timer(t1_rem);
+        let t1_alpha = if self.timer1_started > 0 { 1.0 } else { 0.7 };
+        let t1_hover = if self.hover == HoverTile::Timer1 { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            &t1_str, (lay.timer1.x + lay.timer1.w) as f32 - t1_w, lay.timer1.y as f32 + 6.0,
+            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, alpha_color(c.timer, t1_alpha * t1_hover),
+            &self.font_family, Weight::BOLD);
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
@@ -830,15 +628,6 @@ impl App {
     fn handle_click(&mut self, x: f64, y: f64) {
         let (mx, my) = (x as u32, y as u32);
         let lay = layout(self.width, self.height);
-
-        if lay.volume.contains(mx, my) {
-            self.dragging_volume = true;
-            self.volume = self.volume_from_y(y);
-            set_volume(self.volume);
-            self.volume_set_at = now_unix();
-            self.draw();
-            return;
-        }
 
         if lay.toggle.contains(mx, my) {
             let arg = if self.is_dim { "1" } else { "0" };
@@ -951,6 +740,7 @@ impl App {
         if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
         if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
+        if lay.volume.contains(mx, my) { return HoverTile::Volume; }
         if lay.audio.contains(mx, my) { return HoverTile::Audio; }
         HoverTile::None
     }
@@ -993,58 +783,6 @@ fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, 
     }
 }
 
-fn fill_triangle(
-    data: &mut [u8], pw: u32, ph: u32,
-    verts: [(f32, f32); 3], c: [u8; 3], a: u8,
-    clip_y_min: u32, clip_y_max: u32,
-) {
-    if a == 0 { return; }
-    let mut v = verts;
-    if v[0].1 > v[1].1 { v.swap(0, 1); }
-    if v[1].1 > v[2].1 { v.swap(1, 2); }
-    if v[0].1 > v[1].1 { v.swap(0, 1); }
-    let (x0, y0) = v[0];
-    let (x1, y1) = v[1];
-    let (x2, y2) = v[2];
-    if (y2 - y0) < 0.5 { return; }
-    let y_start = ((y0 - 0.5).ceil().max(0.0) as u32).max(clip_y_min);
-    let y_end_f = (y2 - 0.5).floor().min((ph - 1) as f32).min(clip_y_max.saturating_sub(1) as f32);
-    if y_end_f < y_start as f32 { return; }
-    let y_end = y_end_f as u32;
-    for py in y_start..=y_end {
-        let y = py as f32 + 0.5;
-        let t_long = (y - y0) / (y2 - y0);
-        let x_long = x0 + t_long * (x2 - x0);
-        let x_short = if y < y1 {
-            if (y1 - y0) < 0.5 { x0.min(x1) }
-            else { x0 + (y - y0) / (y1 - y0) * (x1 - x0) }
-        } else {
-            if (y2 - y1) < 0.5 { x1.max(x2) }
-            else { x1 + (y - y1) / (y2 - y1) * (x2 - x1) }
-        };
-        let x_left = x_long.min(x_short);
-        let x_right = x_long.max(x_short);
-        let lx = (x_left + 0.5).floor().max(0.0) as u32;
-        let rx = (x_right - 0.5).floor().min((pw - 1) as f32) as u32;
-        if a == 0xff {
-            for px in lx..=rx {
-                let i = (py as usize * pw as usize + px as usize) * 4;
-                data[i] = c[0]; data[i+1] = c[1]; data[i+2] = c[2]; data[i+3] = 0xff;
-            }
-        } else {
-            let a32 = a as u32;
-            let inv = 255 - a32;
-            for px in lx..=rx {
-                let i = (py as usize * pw as usize + px as usize) * 4;
-                data[i]     = ((c[0] as u32 * a32 + data[i] as u32 * inv) / 255) as u8;
-                data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
-                data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
-                data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
-            }
-        }
-    }
-}
-
 fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3], a: u8) {
     if a == 0xff { return fill_rect(data, pw, ph, x, y, w, h, c); }
     if a == 0 { return; }
@@ -1057,17 +795,6 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
             data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
             data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
             data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
-        }
-    }
-}
-
-fn draw_line_45(data: &mut [u8], pw: u32, ph: u32, x0: i32, y0: i32, dx: i32, dy: i32, len: u32, c: [u8; 3]) {
-    for i in 0..len as i32 {
-        let px = x0 + dx * i;
-        let py = y0 + dy * i;
-        if px >= 0 && (px as u32) < pw && py >= 0 && (py as u32) < ph {
-            let idx = (py as usize * pw as usize + px as usize) * 4;
-            data[idx] = c[0]; data[idx+1] = c[1]; data[idx+2] = c[2]; data[idx+3] = 0xff;
         }
     }
 }
@@ -1198,21 +925,12 @@ impl PointerHandler for App {
                 PointerEventKind::Press { button: 0x111, .. } => {
                     self.handle_right_click(event.position.0, event.position.1);
                 }
-                PointerEventKind::Release { button: 0x110, .. } => {
-                    self.dragging_volume = false;
-                }
+                PointerEventKind::Release { .. } => {}
                 PointerEventKind::Motion { .. } => {
-                    if self.dragging_volume {
-                        self.volume = self.volume_from_y(event.position.1);
-                        set_volume(self.volume);
-                        self.volume_set_at = now_unix();
+                    let new_hover = self.hover_tile_at(event.position.0, event.position.1);
+                    if new_hover != self.hover {
+                        self.hover = new_hover;
                         self.draw();
-                    } else {
-                        let new_hover = self.hover_tile_at(event.position.0, event.position.1);
-                        if new_hover != self.hover {
-                            self.hover = new_hover;
-                            self.draw();
-                        }
                     }
                 }
                 PointerEventKind::Leave { .. } => {
@@ -1333,7 +1051,6 @@ fn main() {
         font_system,
         swash_cache: SwashCache::new(),
         colors,
-        font_size: cfg.font_size,
         font_family,
         icon_family,
         timer1_duration: st.timer1_duration,
@@ -1349,7 +1066,6 @@ fn main() {
         hover: HoverTile::None,
         timer1_base: st.timer1_base,
         timer2_base: st.timer2_base,
-        dragging_volume: false,
         volume_set_at: 0,
         weather_temp: st.weather_temp,
         weather_feels: st.weather_feels,
