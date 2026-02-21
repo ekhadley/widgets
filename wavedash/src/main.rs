@@ -105,6 +105,7 @@ struct Colors {
     divider: [u8; 3],
     sun: [u8; 3],
     clock: [u8; 3],
+    accent: [u8; 3],
     weather: [u8; 3],
     audio: [u8; 3],
     volume: [u8; 3],
@@ -122,6 +123,7 @@ impl Default for Colors {
             divider: [0xcd, 0xd6, 0xf4],
             sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
+            accent: [0x89, 0xb4, 0xfa],
             weather: [0x94, 0xe2, 0xd5],
             audio: [0xcb, 0xa6, 0xf7],
             volume: [0xcb, 0xa6, 0xf7],
@@ -169,6 +171,7 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "divider" => colors.divider = c,
                             "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
+                            "accent" => colors.accent = c,
                             "weather" => colors.weather = c,
                             "audio" => colors.audio = c,
                             "volume" => colors.volume = c,
@@ -486,7 +489,7 @@ impl App {
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, self.width, self.height, bg, bg_a);
 
         // Accent bar (left edge, full height)
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.clock);
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.accent);
 
         let fa = &self.icon_family;
 
@@ -543,10 +546,10 @@ impl App {
 
         // Toggle icon (sun/moon, top)
         let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
-        let mut icon_color = if self.weather_is_day { c.sun } else { c.clock };
+        let mut icon_color = c.sun;
         icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            icon_char, icon_x, lay.toggle.y as f32 + 6.0,
+            icon_char, icon_x + 1.0, lay.toggle.y as f32 + 6.0,
             UTIL_ICON_SIZE, 30.0, 30.0, icon_color,
             fa, Weight::BLACK);
 
