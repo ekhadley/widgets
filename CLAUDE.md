@@ -214,9 +214,9 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - make control backspace delete the entire current search
 
 ### wavedash
-- pausing a timer that is negative sets it to 0:00
 - Timer alert — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
 - Network tile — wifi SSID + signal strength or ethernet indicator
 - Notification toggle — click to enable/disable `makoctl` (or similar) do-not-disturb mode
+- Better layout abstractions — reduce overhead while adding consistency and styling
 
 ### wallrun

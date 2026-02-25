@@ -105,7 +105,8 @@ struct Colors {
     divider: [u8; 3],
     sun: [u8; 3],
     clock: [u8; 3],
-    accent: [u8; 3],
+    accentl: [u8; 3],
+    accentr: [u8; 3],
     weather: [u8; 3],
     audio: [u8; 3],
     volume: [u8; 3],
@@ -123,7 +124,8 @@ impl Default for Colors {
             divider: [0xcd, 0xd6, 0xf4],
             sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
-            accent: [0x89, 0xb4, 0xfa],
+            accentl: [0x89, 0xb4, 0xfa],
+            accentr: [0x89, 0xb4, 0xfa],
             weather: [0x94, 0xe2, 0xd5],
             audio: [0xcb, 0xa6, 0xf7],
             volume: [0xcb, 0xa6, 0xf7],
@@ -171,7 +173,8 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "divider" => colors.divider = c,
                             "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
-                            "accent" => colors.accent = c,
+                            "accentl" => colors.accentl = c,
+                            "accentr" => colors.accentr = c,
                             "weather" => colors.weather = c,
                             "audio" => colors.audio = c,
                             "volume" => colors.volume = c,
@@ -357,6 +360,7 @@ impl Rect {
 struct Layout {
     toggle: Rect,
     clock: Rect,
+    date: Rect,
     notif: Rect,
     weather: Rect,
     timer1: Rect,
@@ -378,8 +382,10 @@ fn layout(w: u32, h: u32) -> Layout {
     let r0 = sec_y;
     let r1 = sec_y + row_h;
     let r2 = sec_y + row_h * 2;
+    let date_y = top_y + (CLOCK_HM_SIZE * LINE_HEIGHT + 6.0) as u32;
     Layout {
         clock: Rect { x: lm, y: top_y, w: 240, h: top_h },
+        date: Rect { x: lm, y: date_y, w: 150, h: (DATE_SIZE * LINE_HEIGHT + 4.0) as u32 },
         weather: Rect { x: right - 160, y: top_y, w: 160, h: top_h },
         toggle: Rect { x: lm, y: r0, w: 32, h: row_h },
         notif: Rect { x: lm, y: r1, w: 32, h: row_h },
@@ -393,7 +399,7 @@ fn layout(w: u32, h: u32) -> Layout {
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Volume, Audio }
+enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Volume, Audio, Date }
 
 // --- App ---
 
@@ -488,8 +494,9 @@ impl App {
         // Full-bleed background
         fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, self.width, self.height, bg, bg_a);
 
-        // Accent bar (left edge, full height)
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.accent);
+        // Accent bars (left + right edge, full height)
+        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.accentl);
+        fill_rect(pixmap.data_mut(), pw, ph, self.width - ACCENT_W, 0, ACCENT_W, self.height, c.accentr);
 
         let fa = &self.icon_family;
 
@@ -502,12 +509,13 @@ impl App {
             CLOCK_HM_SIZE, lay.clock.w as f32, lay.clock.h as f32, c.clock,
             &self.font_family, Weight::BOLD);
 
-        // Date below clock
+        // Date below clock (clickable — opens Google Calendar)
         let date_str = format_date();
         let date_y = clock_y + CLOCK_HM_SIZE * LINE_HEIGHT + 2.0;
+        let date_alpha = if self.hover == HoverTile::Date { 1.0 } else { 0.75 };
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &date_str, LEFT_MARGIN, date_y,
-            DATE_SIZE, lay.clock.w as f32, 30.0, alpha_color(c.clock, 0.75),
+            DATE_SIZE, lay.clock.w as f32, 30.0, alpha_color(c.clock, date_alpha),
             &self.font_family, Weight::BOLD);
 
         // --- Weather (top-right) ---
@@ -676,6 +684,11 @@ impl App {
             return;
         }
 
+        if lay.date.contains(mx, my) {
+            Command::new("xdg-open").arg("https://calendar.google.com").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            return;
+        }
+
         if lay.audio.contains(mx, my) {
             let target = if self.headphones { &self.bt_device_2 } else { &self.bt_device_1 };
             let target = target.clone();
@@ -739,6 +752,7 @@ impl App {
         let (mx, my) = (x as u32, y as u32);
         let lay = layout(self.width, self.height);
 
+        if lay.date.contains(mx, my) { return HoverTile::Date; }
         if lay.toggle.contains(mx, my) { return HoverTile::Toggle; }
         if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
@@ -765,10 +779,12 @@ fn format_date() -> String {
     let t = secs as i64;
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
     unsafe { libc::localtime_r(&t as *const i64, &mut tm) };
+    let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     let months = ["January", "February", "March", "April", "May", "June",
                   "July", "August", "September", "October", "November", "December"];
+    let day = days[tm.tm_wday as usize];
     let month = months[tm.tm_mon as usize];
-    format!("{} {}", month, tm.tm_mday)
+    format!("{}, {} {}", day, month, tm.tm_mday)
 }
 
 // --- Rendering helpers ---
