@@ -1007,7 +1007,7 @@ delegate_registry!(App);
 // --- Main ---
 
 fn main() {
-    let cfg = load_config();
+    let mut cfg = load_config();
     let colors = load_colors(cfg.color_file.as_deref());
 
     let args: Vec<String> = std::env::args().collect();
@@ -1017,6 +1017,11 @@ fn main() {
         match args[i].as_str() {
             "--dmenu" => { mode = Mode::Dmenu; i += 1; }
             "--drun" => { mode = Mode::Drun; i += 1; }
+            "--columns" => {
+                i += 1;
+                if i < args.len() { if let Ok(v) = args[i].parse() { cfg.columns = v; } }
+                i += 1;
+            }
             _ => { eprintln!("grimoire: unknown arg: {}", args[i]); i += 1; }
         }
     }

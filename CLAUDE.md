@@ -106,7 +106,7 @@ Floating overlay for Hyprland — clock, weather, pomodoro timers, volume contro
 Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`).
 
 **Features:**
-- Clock (HH:MM:SS + "Month Day"), updates every second via calloop timer
+- Clock (HH:MM:SS + "Wed, February 25"), updates every second via calloop timer
 - Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
 - State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
@@ -214,9 +214,8 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - make control backspace delete the entire current search
 
 ### wavedash
-- Timer alert — when pomodoro timers hit zero, spawn a brief fullscreen flash or floating notification. Currently timers just go negative silently.
+- Timer alert — when pomodoro timers hit zero, notify somehow. Probably just bring up the panel.
 - Network tile — wifi SSID + signal strength or ethernet indicator
-- Notification toggle — click to enable/disable `makoctl` (or similar) do-not-disturb mode
 - Better layout abstractions — reduce overhead while adding consistency and styling
 
 ### wallrun
