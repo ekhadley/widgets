@@ -333,7 +333,6 @@ const VOL_BAR_SIZE: f32 = 21.0;
 const LINE_HEIGHT: f32 = 1.2;
 
 // Hover
-const HOVER_OPACITY_DEFAULT: f32 = 0.7;
 
 // Volume
 const VOL_SCROLL_STEP: f32 = 0.05;
@@ -400,6 +399,7 @@ fn layout(w: u32, h: u32) -> Layout {
 
 #[derive(PartialEq, Clone, Copy)]
 enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Volume, Audio, Date }
+
 
 // --- App ---
 
@@ -479,6 +479,7 @@ impl App {
         let bg = c.background;
         let bg_a = c.background_alpha;
         let lay = layout(self.width, self.height);
+        let hv = self.hover;
 
         let stride = self.width as i32 * 4;
         let (wl_buf, canvas) = self.pool
@@ -512,10 +513,10 @@ impl App {
         // Date below clock (clickable — opens Google Calendar)
         let date_str = format_date();
         let date_y = clock_y + CLOCK_HM_SIZE * LINE_HEIGHT + 2.0;
-        let date_alpha = if self.hover == HoverTile::Date { 1.0 } else { 0.75 };
+
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &date_str, LEFT_MARGIN, date_y,
-            DATE_SIZE, lay.clock.w as f32, 30.0, alpha_color(c.clock, date_alpha),
+            DATE_SIZE, lay.clock.w as f32, 30.0, hover_color(c.clock, hv == HoverTile::Date),
             &self.font_family, Weight::BOLD);
 
         // --- Weather (top-right) ---
@@ -555,7 +556,7 @@ impl App {
         // Toggle icon (sun/moon, top)
         let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
         let mut icon_color = c.sun;
-        icon_color = alpha_color(icon_color, if self.hover == HoverTile::Toggle { 1.0 } else { HOVER_OPACITY_DEFAULT });
+        icon_color = hover_color(icon_color, hv == HoverTile::Toggle);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             icon_char, icon_x + 1.0, lay.toggle.y as f32 + 6.0,
             UTIL_ICON_SIZE, 30.0, 30.0, icon_color,
@@ -563,7 +564,7 @@ impl App {
 
         // Notif icon (middle)
         let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" };
-        let notif_color = alpha_color(c.notif, if self.hover == HoverTile::Notif { 1.0 } else { HOVER_OPACITY_DEFAULT });
+        let notif_color = hover_color(c.notif, hv == HoverTile::Notif);
         let notif_w_on = measure_text(&mut self.font_system, "\u{f0f3}", UTIL_ICON_SIZE, fa, Weight::BLACK);
         let notif_w_off = measure_text(&mut self.font_system, "\u{f1f6}", UTIL_ICON_SIZE, fa, Weight::BLACK);
         let notif_w_cur = if self.notif_paused { notif_w_off } else { notif_w_on };
@@ -576,29 +577,29 @@ impl App {
         // Audio icon (bottom)
         let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
         let ai_alpha = if self.muted { 0.3 } else { 1.0 };
-        let ai_hover = if self.hover == HoverTile::Audio { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let ai_hovered = hv == HoverTile::Audio;
         let ai_w = measure_text(&mut self.font_system, audio_icon, UTIL_ICON_SIZE, fa, Weight::BLACK);
         let ai_x = lay.audio.x as f32 + (lay.audio.w as f32 - ai_w) / 2.0 - 2.0;
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             audio_icon, ai_x, lay.audio.y as f32 + 6.0,
-            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(c.audio, ai_alpha * ai_hover),
+            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.audio, ai_hovered), ai_alpha),
             fa, Weight::BLACK);
 
         // --- Volume bar (same row as audio) ---
         let vol_steps: usize = 16;
         let vol_pct = (self.volume / VOL_MAX * vol_steps as f32).round() as usize;
         let filled_count = vol_pct.min(vol_steps);
-        let vol_hover = if self.hover == HoverTile::Volume { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let vol_hovered = hv == HoverTile::Volume;
         let vol_alpha = if self.muted { 0.3 } else { 1.0 };
         let vol_x = lay.volume.x as f32;
         let block_w = measure_text(&mut self.font_system, "\u{2588}", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
         let space_w = measure_text(&mut self.font_system, " ", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
         let step = block_w + space_w * 0.25 - 1.0;
         for i in 0..vol_steps {
-            let (ch, alpha) = if i < filled_count { ("\u{2588}", vol_alpha * vol_hover) } else { ("\u{2591}", 0.55 * vol_hover) };
+            let (ch, alpha) = if i < filled_count { ("\u{2588}", vol_alpha) } else { ("\u{2591}", 0.55) };
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
                 ch, vol_x + i as f32 * step, lay.audio.y as f32 + 6.0,
-                VOL_BAR_SIZE, block_w + 1.0, 30.0, alpha_color(c.volume, alpha),
+                VOL_BAR_SIZE, block_w + 1.0, 30.0, alpha_color(hover_color(c.volume, vol_hovered), alpha),
                 &self.font_family, Weight::BOLD);
         }
 
@@ -606,21 +607,21 @@ impl App {
         let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
         let t2_str = format_timer(t2_rem);
         let t2_alpha = if self.timer2_started > 0 { 1.0 } else { 0.7 };
-        let t2_hover = if self.hover == HoverTile::Timer2 { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let t2_hovered = hv == HoverTile::Timer2;
         let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &t2_str, (lay.timer2.x + lay.timer2.w) as f32 - t2_w, lay.timer2.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, alpha_color(c.timer, t2_alpha * t2_hover),
+            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, alpha_color(hover_color(c.timer, t2_hovered), t2_alpha),
             &self.font_family, Weight::BOLD);
 
         let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
         let t1_str = format_timer(t1_rem);
         let t1_alpha = if self.timer1_started > 0 { 1.0 } else { 0.7 };
-        let t1_hover = if self.hover == HoverTile::Timer1 { 1.0 } else { HOVER_OPACITY_DEFAULT };
+        let t1_hovered = hv == HoverTile::Timer1;
         let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &t1_str, (lay.timer1.x + lay.timer1.w) as f32 - t1_w, lay.timer1.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, alpha_color(c.timer, t1_alpha * t1_hover),
+            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, alpha_color(hover_color(c.timer, t1_hovered), t1_alpha),
             &self.font_family, Weight::BOLD);
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
@@ -791,6 +792,12 @@ fn format_date() -> String {
 
 fn alpha_color(c: [u8; 3], a: f32) -> [u8; 3] {
     [(c[0] as f32 * a) as u8, (c[1] as f32 * a) as u8, (c[2] as f32 * a) as u8]
+}
+
+fn hover_color(c: [u8; 3], hovered: bool) -> [u8; 3] {
+    if !hovered { return c; }
+    let b = |v: f32| (v + (255.0 - v) * 0.25).min(255.0) as u8;
+    [b(c[0] as f32), b(c[1] as f32), b(c[2] as f32)]
 }
 
 fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {

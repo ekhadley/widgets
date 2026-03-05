@@ -470,10 +470,14 @@ struct App {
     terminal_cmd: String,
     font_family: String,
     hover_index: Option<usize>,
+    hover_alpha: f32,
+    fade_out_index: Option<usize>,
+    fade_out_alpha: f32,
     cols: usize,
     show_comments: bool,
     search_comments: bool,
     frecency: HashMap<String, FrecencyEntry>,
+    modifiers: Modifiers,
 }
 
 const BAR_H: f32 = 50.0;
@@ -583,7 +587,11 @@ impl App {
         let ecols = self.effective_cols();
         let changed = match event.keysym {
             Keysym::BackSpace => {
-                if self.input.pop().is_some() { self.refilter(); true } else { false }
+                if self.modifiers.ctrl {
+                    if !self.input.is_empty() { self.input.clear(); self.refilter(); true } else { false }
+                } else {
+                    if self.input.pop().is_some() { self.refilter(); true } else { false }
+                }
             }
             Keysym::Left if self.selected > 0 => { self.selected -= 1; true }
             Keysym::Right if self.selected + 1 < n => { self.selected += 1; true }
@@ -630,6 +638,9 @@ impl App {
         let end = (start + visible).min(self.filtered.len());
         let selected = self.selected;
         let hover = self.hover_index;
+        let hover_alpha = self.hover_alpha;
+        let fade_out = self.fade_out_index;
+        let fade_out_alpha = self.fade_out_alpha;
         let filtered: Vec<usize> = self.filtered[start..end].to_vec();
 
         let stride = width as i32 * 4;
@@ -676,8 +687,17 @@ impl App {
                 fill_rect_alpha(pixmap.data_mut(), pw, ph,
                     cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, sel_alpha);
             } else if hover == Some(i) {
-                fill_rect_alpha(pixmap.data_mut(), pw, ph,
-                    cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, sel_alpha / 2);
+                let a = (sel_alpha as f32 / 2.0 * hover_alpha) as u8;
+                if a > 0 {
+                    fill_rect_alpha(pixmap.data_mut(), pw, ph,
+                        cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, a);
+                }
+            } else if fade_out == Some(i) {
+                let a = (sel_alpha as f32 / 2.0 * fade_out_alpha) as u8;
+                if a > 0 {
+                    fill_rect_alpha(pixmap.data_mut(), pw, ph,
+                        cell_x as u32, cell_y as u32, col_w as u32, row_h as u32, sel_color, a);
+                }
             }
 
             // Icon
@@ -929,7 +949,7 @@ impl KeyboardHandler for App {
         self.handle_key(&event);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: RawModifiers, _: u32) {}
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, modifiers: Modifiers, _: RawModifiers, _: u32) { self.modifiers = modifiers; }
 }
 
 impl PointerHandler for App {
@@ -952,7 +972,12 @@ impl PointerHandler for App {
                 PointerEventKind::Motion { .. } => {
                     let new_hover = self.item_at_pos(event.position.0 as f32, event.position.1 as f32);
                     if new_hover != self.hover_index {
+                        if self.hover_index.is_some() {
+                            self.fade_out_index = self.hover_index;
+                            self.fade_out_alpha = self.hover_alpha;
+                        }
                         self.hover_index = new_hover;
+                        self.hover_alpha = if new_hover.is_some() { 0.0 } else { 1.0 };
                         redraw = true;
                     }
                 }
@@ -1093,14 +1118,29 @@ fn main() {
         terminal_cmd: cfg.terminal,
         font_family,
         hover_index: None,
+        hover_alpha: 1.0,
+        fade_out_index: None,
+        fade_out_alpha: 0.0,
         cols: cfg.columns.max(1),
         show_comments: cfg.show_comments,
         search_comments: cfg.search_comments,
         frecency,
+        modifiers: Modifiers::default(),
     };
 
     loop {
         event_loop.dispatch(Duration::from_millis(16), &mut app).unwrap();
         if app.exit { break; }
+        let mut anim = false;
+        if app.hover_index.is_some() && app.hover_alpha < 1.0 {
+            app.hover_alpha = (app.hover_alpha + 0.15).min(1.0);
+            anim = true;
+        }
+        if app.fade_out_index.is_some() {
+            app.fade_out_alpha = (app.fade_out_alpha - 0.15).max(0.0);
+            anim = true;
+            if app.fade_out_alpha == 0.0 { app.fade_out_index = None; }
+        }
+        if anim { app.draw(); }
     }
 }
