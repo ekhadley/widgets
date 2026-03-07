@@ -188,6 +188,55 @@ search_comments = false
 
 **Color keys:** `background`, `background_opacity`, `border`, `bar_bg`, `bar_border`, `text`, `text_comment`, `text_placeholder`, `selection`, `selection_opacity`
 
+### evoke
+
+Speech-to-text overlay — records audio, transcribes via whisper.cpp (CUDA), copies text to clipboard and pastes.
+
+**Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, whisper-rs (CUDA), serde + toml
+
+Single file: `src/main.rs`. Layer-shell overlay with keyboard (Escape to cancel). No font/text rendering — pure geometry.
+
+**Features:**
+- Records audio via `pw-record` subprocess (16kHz mono s16le), piped to stdout
+- Real-time audio visualizer — amplitude bars driven by RMS ring buffer
+- Transcription via whisper-rs (whisper.cpp built from source with CUDA) in background thread
+- Idle animation during transcription — scrolling sinusoidal wave
+- Copies transcribed text to clipboard (`wl-copy`) and pastes (`ydotool key` Ctrl+V)
+- Escape key exits immediately (exclusive keyboard grab), SIGTERM cancels without transcribing
+- Model loads after stop signal (instant launch, cancel-friendly)
+- No state persistence
+
+**Architecture:**
+- `App::draw()` renders amplitude bars (recording) or sine wave (transcribing) to `tiny_skia::Pixmap`
+- `App::process_audio_chunk()` parses s16le from pw-record stdout, updates ring buffer
+- `App::stop_and_transcribe()` kills pw-record, spawns transcription thread
+- calloop `Generic` source watches pw-record stdout fd (non-blocking via `libc::fcntl`)
+- calloop `Timer` at ~30fps redraws visualizer, polls SIGUSR1 flag and transcription channel
+- SIGUSR1 via `libc::sigaction` + `AtomicBool`, checked in timer callback
+- Transcription result received via `mpsc::channel` from background thread
+
+**Toggle script** (`evoke_toggle`): `pkill -x -USR1 evoke || evoke &` — sends SIGUSR1 to stop+transcribe if running, launches if not. Note: must use `pkill -x` (exact match) to avoid matching the toggle script process itself.
+
+**Config** — `~/.config/widgets/evoke.toml` (all optional):
+```toml
+color_file = "~/.cache/wal/colors-evoke.toml"
+model = "medium.en"
+models_dir = "~/.local/share/pywhispercpp/models"
+sounds = false
+width = 300
+height = 60
+bar_count = 48
+bar_width = 4
+bar_gap = 2
+margin = 0.25          # bottom margin as fraction of screen height
+scale = 4.0            # amplitude multiplier for visualizer
+border_width = 1
+```
+
+**Color keys:** `background`, `background_opacity`, `border`, `waveform`
+
+**Build note:** First build is slow (~1-2 min) as whisper-rs compiles whisper.cpp with CUDA via cmake. Subsequent builds are cached. Requires CUDA toolkit and cmake.
+
 ## External scripts
 
 Scripts in `../scripts/` that use these widgets:
