@@ -110,7 +110,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
 - 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
 - State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
-- Volume bar (0-200%) via `wpctl`, scroll to adjust, bevelled top/bottom (45° points via `fill_triangle`)
+- Volume bar (0-200%) via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`)
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
 - Day/night toggle via `dim_toggle.sh`
 - 14 color dots from walrs palette (7×2 grid)
@@ -263,6 +263,7 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - make control backspace delete the entire current search
 
 ### wavedash
+- Long press detect — configure the keycode/binding that activates wavedash, detect on startup whether the key is held. If held the entire startup period (long press), dismiss on key release. If released early (short press), stay open until toggled off by another press.
 - Timer alert — when pomodoro timers hit zero, notify somehow. Probably just bring up the panel.
 - Network tile — wifi SSID + signal strength or ethernet indicator
 - Better layout abstractions — reduce overhead while adding consistency and styling

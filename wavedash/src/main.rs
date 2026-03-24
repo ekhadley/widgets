@@ -329,7 +329,6 @@ const WEATHER_TEMP_SIZE: f32 = 36.0;
 const WEATHER_FEELS_SIZE: f32 = 18.0;
 const TIMER_SIZE: f32 = 32.0;
 const UTIL_ICON_SIZE: f32 = 21.0;
-const VOL_BAR_SIZE: f32 = 21.0;
 const LINE_HEIGHT: f32 = 1.2;
 
 // Hover
@@ -585,22 +584,21 @@ impl App {
             UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.audio, ai_hovered), ai_alpha),
             fa, Weight::BLACK);
 
-        // --- Volume bar (same row as audio) ---
-        let vol_steps: usize = 16;
-        let vol_pct = (self.volume / VOL_MAX * vol_steps as f32).round() as usize;
-        let filled_count = vol_pct.min(vol_steps);
+        // --- Volume bar (same row as audio, rounded fill bar) ---
         let vol_hovered = hv == HoverTile::Volume;
-        let vol_alpha = if self.muted { 0.3 } else { 1.0 };
-        let vol_x = lay.volume.x as f32;
-        let block_w = measure_text(&mut self.font_system, "\u{2588}", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
-        let space_w = measure_text(&mut self.font_system, " ", VOL_BAR_SIZE, &self.font_family, Weight::BOLD);
-        let step = block_w + space_w * 0.25 - 1.0;
-        for i in 0..vol_steps {
-            let (ch, alpha) = if i < filled_count { ("\u{2588}", vol_alpha) } else { ("\u{2591}", 0.55) };
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                ch, vol_x + i as f32 * step, lay.audio.y as f32 + 6.0,
-                VOL_BAR_SIZE, block_w + 1.0, 30.0, alpha_color(hover_color(c.volume, vol_hovered), alpha),
-                &self.font_family, Weight::BOLD);
+        let vol_color = hover_color(c.volume, vol_hovered);
+        let bar_h: u32 = 8;
+        let bar_w = lay.volume.w;
+        let bar_x = lay.volume.x;
+        let icon_center_y = lay.audio.y as f32 + 6.0 + UTIL_ICON_SIZE * LINE_HEIGHT / 2.0;
+        let bar_y = (icon_center_y - bar_h as f32 / 2.0) as u32;
+        let bar_r: u32 = bar_h / 2;
+        let track_alpha: u8 = if self.muted { 25 } else { 50 };
+        let fill_alpha: u8 = if self.muted { 77 } else { 255 };
+        fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, bar_w, bar_h, bar_r, vol_color, track_alpha);
+        let fill_w = ((self.volume / VOL_MAX) * bar_w as f32).round() as u32;
+        if fill_w > 0 {
+            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, fill_w.min(bar_w), bar_h, bar_r, vol_color, fill_alpha);
         }
 
         // --- Timers (bottom-right, stacked: short on top, long on bottom) ---
@@ -821,6 +819,37 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
             data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
             data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
             data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
+        }
+    }
+}
+
+fn fill_rounded_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, r: u32, c: [u8; 3], a: u8) {
+    if a == 0 || w == 0 || h == 0 { return; }
+    let r = r.min(w / 2).min(h / 2);
+    let a32 = a as u32;
+    let inv = 255 - a32;
+    for py in y..y.saturating_add(h).min(ph) {
+        for px in x..x.saturating_add(w).min(pw) {
+            let lx = px - x;
+            let ly = py - y;
+            // Check if pixel is in a corner region and outside the rounded arc
+            let in_corner = (lx < r && ly < r) || (lx >= w - r && ly < r) || (lx < r && ly >= h - r) || (lx >= w - r && ly >= h - r);
+            if in_corner {
+                let cx = if lx < r { r } else { w - r };
+                let cy = if ly < r { r } else { h - r };
+                let dx = lx as f32 - cx as f32 + 0.5;
+                let dy = ly as f32 - cy as f32 + 0.5;
+                if dx * dx + dy * dy > (r as f32) * (r as f32) { continue; }
+            }
+            let i = (py as usize * pw as usize + px as usize) * 4;
+            if a == 0xff {
+                data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 0xff;
+            } else {
+                data[i]     = ((c[0] as u32 * a32 + data[i] as u32 * inv) / 255) as u8;
+                data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
+                data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
+                data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
+            }
         }
     }
 }
