@@ -10,4 +10,4 @@ smithay-client-toolkit = { version = "0.20.0", features = ["calloop"] }
 tiny-skia = "0.12.0"
 toml = "0.8"
 wayland-client = "0.31.12"
-whisper-rs = { version = "0.15", features = ["cuda"] }
+whisper-rs = { version = "0.16", features = ["cuda"] }

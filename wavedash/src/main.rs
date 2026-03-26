@@ -295,12 +295,14 @@ fn set_volume(vol: f32) {
         .spawn().ok();
 }
 
-fn is_headphones() -> bool {
+fn is_headphones(bt_mac: &str) -> bool {
     let out = Command::new("wpctl").args(["inspect", "@DEFAULT_AUDIO_SINK@"]).output();
     match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            s.contains("ac:bf:71:08:a1:d6") || s.contains("ac_bf_71_08_a1_d6")
+            let mac_lower = bt_mac.to_lowercase();
+            let mac_underscored = mac_lower.replace(':', "_");
+            s.contains(&mac_lower) || s.contains(&mac_underscored)
                 || s.contains("headphone") || s.contains("headset")
         }
         Err(_) => false,
@@ -470,7 +472,7 @@ impl App {
         let (v, m) = get_volume();
         self.volume = v;
         self.muted = m;
-        self.headphones = is_headphones();
+        self.headphones = is_headphones(&self.bt_device_1);
     }
 
     fn draw(&mut self) {
@@ -1055,7 +1057,7 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true").unwrap_or(false);
 
     let (volume, muted) = get_volume();
-    let headphones = is_headphones();
+    let headphones = is_headphones(&cfg.bt_device_1);
 
     let conn = Connection::connect_to_env().unwrap();
     let (globals, event_queue) = registry_queue_init::<App>(&conn).unwrap();
