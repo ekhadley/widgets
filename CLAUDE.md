@@ -154,7 +154,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 **Features:**
 - Two modes: `--drun` (default, app launcher) and `--dmenu` (stdin lines, prints selection to stdout)
 - Layer-shell overlay with configurable dimensions
-- Fuzzy search — typed characters filter items by name and comment
+- Fuzzy search — typed characters filter items by name and comment, scored by character proximity (tighter matches rank first)
 - Configurable multi-column grid layout (items flow left-to-right, top-to-bottom, centered when fewer items than columns)
 - Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete)
 - Mouse input (click to select, hover to highlight, scroll wheel)
@@ -184,7 +184,10 @@ terminal = "ghostty -e"
 columns = 1
 show_comments = true
 search_comments = false
+center_items = false
 ```
+
+**CLI flags:** `--drun`, `--dmenu`, `--columns N`, `--center-items`, `--relative-paths <prefix>` (strips prefix from stdin lines for display, preserves full path for output)
 
 **Color keys:** `background`, `background_opacity`, `border`, `bar_bg`, `bar_border`, `text`, `text_comment`, `text_placeholder`, `selection`, `selection_opacity`
 
