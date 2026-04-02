@@ -51,6 +51,7 @@ struct Config {
     columns: usize,
     show_comments: bool,
     search_comments: bool,
+    center_items: bool,
 }
 
 impl Default for Config {
@@ -60,7 +61,7 @@ impl Default for Config {
             font_size: 18.0, comment_font_size: 14.0, icon_size: 32,
             window_width: 600, window_height: 400,
             terminal: "ghostty -e".into(),
-            columns: 1, show_comments: true, search_comments: false,
+            columns: 1, show_comments: true, search_comments: false, center_items: false,
         }
     }
 }
@@ -424,11 +425,15 @@ fn load_desktop_entries(icon_size: u32, frecency: &HashMap<String, FrecencyEntry
     items
 }
 
-fn load_stdin_items() -> Vec<Item> {
+fn load_stdin_items(strip_prefix: Option<&str>) -> Vec<Item> {
     let stdin = std::io::stdin();
     stdin.lock().lines().flatten().map(|line| {
+        let name = match strip_prefix {
+            Some(pfx) => line.strip_prefix(pfx).unwrap_or(&line).trim_start_matches('/').to_string(),
+            None => line.clone(),
+        };
         Item {
-            name: line.clone(), exec: line, comment: String::new(),
+            name, exec: line, comment: String::new(),
             icon_data: None, icon_w: 0, icon_h: 0, terminal: false, desktop_id: String::new(),
         }
     }).collect()
@@ -476,6 +481,7 @@ struct App {
     cols: usize,
     show_comments: bool,
     search_comments: bool,
+    center_items: bool,
     frecency: HashMap<String, FrecencyEntry>,
     modifiers: Modifiers,
 }
@@ -531,10 +537,20 @@ impl App {
         self.filtered = if self.input.is_empty() {
             (0..self.items.len()).collect()
         } else {
-            (0..self.items.len())
-                .filter(|&i| fuzzy_match(&self.items[i].name, &self.input)
-                    || (self.search_comments && fuzzy_match(&self.items[i].comment, &self.input)))
-                .collect()
+            let mut scored: Vec<(usize, u32)> = (0..self.items.len())
+                .filter_map(|i| {
+                    let name_score = fuzzy_score(&self.items[i].name, &self.input);
+                    let comment_score = if self.search_comments { fuzzy_score(&self.items[i].comment, &self.input) } else { None };
+                    match (name_score, comment_score) {
+                        (Some(a), Some(b)) => Some((i, a.min(b))),
+                        (Some(a), None) => Some((i, a)),
+                        (None, Some(b)) => Some((i, b)),
+                        (None, None) => None,
+                    }
+                })
+                .collect();
+            scored.sort_by_key(|&(_, s)| s);
+            scored.into_iter().map(|(i, _)| i).collect()
         };
         self.selected = 0;
         self.scroll_offset = 0;
@@ -700,12 +716,21 @@ impl App {
                 }
             }
 
+            // Measure content width for centering
+            let name_w = measure_text(&mut self.font_system, &self.items[item_idx].name, font_size, &self.font_family);
+            let has_comment = show_comments && !self.items[item_idx].comment.is_empty();
+            let comment_w = if has_comment {
+                measure_text(&mut self.font_system, &self.items[item_idx].comment, comment_font_size, &self.font_family)
+            } else { 0.0 };
+            let content_w = icon_pad + name_w + if has_comment { 12.0 + comment_w } else { 0.0 };
+            let cx = if self.center_items { ((col_w - content_w) / 2.0).max(0.0) } else { 0.0 };
+
             // Icon
             if has_icons {
                 if let Some(ref data) = self.items[item_idx].icon_data {
                     let iw = self.items[item_idx].icon_w;
                     let ih = self.items[item_idx].icon_h;
-                    let ix = cell_x as i32 + PAD as i32;
+                    let ix = (cell_x + cx) as i32 + PAD as i32;
                     let iy = cell_y as i32 + (row_h as i32 - ih as i32) / 2;
                     blit_rgba(pixmap.data_mut(), pw as i32, ph as i32,
                         ix, iy, iw as i32, ih as i32, data);
@@ -714,20 +739,14 @@ impl App {
 
             // Name
             let name_y = cell_y + (row_h + font_size) / 2.0;
-            let max_name_w = if !show_comments || self.items[item_idx].comment.is_empty() {
-                (col_w - icon_pad).max(0.0)
-            } else {
-                (col_w - icon_pad) * 0.5
-            };
+            let max_name_w = (col_w - icon_pad - cx).max(0.0);
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                &self.items[item_idx].name, text_x, name_y, font_size,
+                &self.items[item_idx].name, text_x + cx, name_y, font_size,
                 max_name_w, row_h, text_color, &self.font_family);
 
             // Comment
-            if show_comments && !self.items[item_idx].comment.is_empty() {
-                let name_w = measure_text(&mut self.font_system, &self.items[item_idx].name,
-                    font_size, &self.font_family);
-                let comment_x = text_x + name_w.min(max_name_w) + 12.0;
+            if has_comment {
+                let comment_x = text_x + cx + name_w.min(max_name_w) + 12.0;
                 let comment_y = cell_y + (row_h + comment_font_size) / 2.0;
                 let comment_max_w = (cell_x + col_w - comment_x - PAD).max(0.0);
                 if comment_max_w > 20.0 {
@@ -755,14 +774,25 @@ impl App {
 
 // --- Rendering helpers ---
 
-fn fuzzy_match(haystack: &str, needle: &str) -> bool {
-    let h = haystack.to_lowercase();
-    let n = needle.to_lowercase();
-    let mut hi = h.chars();
-    for nc in n.chars() {
-        if !hi.any(|hc| hc == nc) { return false; }
+// Lower score = better match. None = no match.
+fn fuzzy_score(haystack: &str, needle: &str) -> Option<u32> {
+    let h: Vec<char> = haystack.to_lowercase().chars().collect();
+    let n: Vec<char> = needle.to_lowercase().chars().collect();
+    let mut hi = 0;
+    let mut score = 0u32;
+    let mut prev_pos = 0i32;
+    for &nc in &n {
+        loop {
+            if hi >= h.len() { return None; }
+            if h[hi] == nc { break; }
+            hi += 1;
+        }
+        let gap = (hi as i32 - prev_pos).unsigned_abs();
+        score += gap;
+        prev_pos = hi as i32 + 1;
+        hi += 1;
     }
-    true
+    Some(score)
 }
 
 fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3], a: u8) {
@@ -806,20 +836,22 @@ fn measure_text(font_system: &mut FontSystem, text: &str, font_size: f32, family
 
 fn render_text(
     pixmap: &mut Pixmap, font_system: &mut FontSystem, swash_cache: &mut SwashCache,
-    text: &str, x: f32, y: f32, font_size: f32, max_w: f32, max_h: f32, color: [u8; 3],
+    text: &str, x: f32, y: f32, font_size: f32, max_w: f32, _max_h: f32, color: [u8; 3],
     family: &str,
 ) {
     let line_h = font_size * 1.2;
     let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_h));
-    buf.set_size(font_system, Some(max_w), Some(max_h));
+    buf.set_size(font_system, None, None);
     buf.set_text(font_system, text, &make_attrs(family), Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
     let pw = pixmap.width() as i32;
     let ph = pixmap.height() as i32;
+    let x_max = (x + max_w) as i32;
     if let Some(run) = buf.layout_runs().next() {
         for glyph in run.glyphs.iter() {
             let physical = glyph.physical((x, y), 1.0);
+            if physical.x >= x_max { break; }
             if let Some(image) = swash_cache.get_image_uncached(font_system, physical.cache_key) {
                 let x0 = physical.x + image.placement.left;
                 let y0 = physical.y - image.placement.top;
@@ -1037,6 +1069,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let mut mode = Mode::Drun;
+    let mut relative_paths: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1047,6 +1080,11 @@ fn main() {
                 if i < args.len() { if let Ok(v) = args[i].parse() { cfg.columns = v; } }
                 i += 1;
             }
+            "--center-items" => { cfg.center_items = true; i += 1; }
+            "--relative-paths" => {
+                i += 1;
+                if i < args.len() { relative_paths = Some(args[i].clone()); i += 1; }
+            }
             _ => { eprintln!("grimoire: unknown arg: {}", args[i]); i += 1; }
         }
     }
@@ -1054,7 +1092,7 @@ fn main() {
     let frecency = load_frecency();
     let items = match mode {
         Mode::Drun => load_desktop_entries(cfg.icon_size, &frecency),
-        Mode::Dmenu => load_stdin_items(),
+        Mode::Dmenu => load_stdin_items(relative_paths.as_deref()),
     };
 
     let width = cfg.window_width;
@@ -1124,6 +1162,7 @@ fn main() {
         cols: cfg.columns.max(1),
         show_comments: cfg.show_comments,
         search_comments: cfg.search_comments,
+        center_items: cfg.center_items,
         frecency,
         modifiers: Modifiers::default(),
     };

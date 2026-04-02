@@ -279,10 +279,10 @@ impl App {
             Keysym::BackSpace => {
                 if self.input.pop().is_some() { self.refilter(); true } else { false }
             }
-            Keysym::Left if self.selected > 0 => { self.selected -= 1; true }
-            Keysym::Right if self.selected + 1 < n => { self.selected += 1; true }
-            Keysym::Up if self.selected >= cols => { self.selected -= cols; true }
-            Keysym::Down if self.selected + cols < n => { self.selected += cols; true }
+            Keysym::Left => { self.selected = if self.selected > 0 { self.selected - 1 } else { n.saturating_sub(1) }; true }
+            Keysym::Right => { self.selected = if self.selected + 1 < n { self.selected + 1 } else { 0 }; true }
+            Keysym::Up => { self.selected = if self.selected >= cols { self.selected - cols } else { (n.saturating_sub(1) / cols) * cols + self.selected % cols }; if self.selected >= n { self.selected = n.saturating_sub(1); } true }
+            Keysym::Down => { self.selected = if self.selected + cols < n { self.selected + cols } else { self.selected % cols }; if self.selected >= n { self.selected = 0; } true }
             _ => match event.utf8 {
                 Some(ref text) if !text.is_empty() && text.chars().all(|c| !c.is_control()) => {
                     self.input.push_str(text);

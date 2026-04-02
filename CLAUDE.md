@@ -269,3 +269,4 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - Better layout abstractions — reduce overhead while adding consistency and styling
 
 ### wallrun
+- Flag for the launcher to only search over the filename rather than the full path string
