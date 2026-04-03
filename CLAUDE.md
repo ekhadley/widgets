@@ -116,6 +116,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - 14 color dots from walrs palette (7×2 grid)
 - Hover highlighting on interactive tiles (toggle, timer1, timer2, audio)
 - Font Awesome 7 Free Solid (weight BLACK) for filled icons, FA Regular (weight NORMAL) for outline icons. Toggle uses filled sun/moon, weather uses outline.
+- Long press detection — hold the toggle key >300ms to peek (dismisses on release), tap quickly for persistent toggle mode. Uses SIGUSR2 from a Hyprland `bindr` release binding.
 
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
@@ -126,6 +127,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
 - calloop `Timer` fires every 100ms for clock/timer/weather redraws
+- Long press: `SIGUSR2` handler via `sigaction` + `AtomicBool` (same pattern as evoke's SIGUSR1). Grace period (`LONG_PRESS_GRACE_MS = 300`) delays the decision — if signal arrives within grace period, short press (persistent); otherwise long press (exit on release). Requires `bindr = CTRL, Control_R, exec, pkill -USR2 -x wavedash` in Hyprland config.
 
 **Config** — `~/.config/widgets/wavedash.toml` (all optional):
 ```toml
@@ -266,7 +268,6 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - make control backspace delete the entire current search
 
 ### wavedash
-- Long press detect — configure the keycode/binding that activates wavedash, detect on startup whether the key is held. If held the entire startup period (long press), dismiss on key release. If released early (short press), stay open until toggled off by another press.
 - Timer alert — when pomodoro timers hit zero, notify somehow. Probably just bring up the panel.
 - Network tile — wifi SSID + signal strength or ethernet indicator
 - Better layout abstractions — reduce overhead while adding consistency and styling
