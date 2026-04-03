@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use libc;
 use std::process::{Command, Child, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit as sctk;
@@ -316,6 +317,14 @@ fn switch_audio(target_mac: &str) {
         .spawn().ok();
 }
 
+// --- Signal (long press detection) ---
+
+static GOT_SIGUSR2: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn sigusr2_handler(_: libc::c_int) {
+    GOT_SIGUSR2.store(true, Ordering::Release);
+}
+
 // --- Layout constants ---
 
 const WIDTH: u32 = 440;
@@ -345,6 +354,7 @@ const TIMER_SCROLL_STEP: i64 = 60;
 // Timing
 const TICK_MS: u64 = 100;
 const AUDIO_REFRESH_COOLDOWN: u64 = 1;
+const LONG_PRESS_GRACE_MS: u64 = 300;
 
 // --- Tile geometry ---
 
@@ -449,6 +459,9 @@ struct App {
     weather_fetch: Option<Child>,
     // Notifications
     notif_paused: bool,
+    // Long press: None = undecided (grace period), Some(true) = exit on key release, Some(false) = persistent
+    long_press: Option<bool>,
+    startup: Instant,
 }
 
 impl App {
@@ -1038,6 +1051,16 @@ delegate_registry!(App);
 // --- Main ---
 
 fn main() {
+    // Install SIGUSR2 handler immediately — must be before any setup so we
+    // catch the release signal even if the key is released during startup.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigusr2_handler as *const () as usize;
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+    }
+
     let cfg = load_config();
     let colors = load_colors(cfg.color_file.as_deref());
     let st = load_state(&cfg);
@@ -1131,11 +1154,21 @@ fn main() {
         weather_fetched: st.weather_fetched,
         weather_fetch,
         notif_paused,
+        long_press: None,
+        startup: Instant::now(),
     };
 
     // 1-second timer for clock/timer redraws
     let timer = Timer::from_duration(std::time::Duration::from_millis(TICK_MS));
     event_loop.handle().insert_source(timer, |_, _, app| {
+        // Long press detection: after grace period, decide mode based on whether key was released
+        if app.long_press.is_none() && app.startup.elapsed().as_millis() >= LONG_PRESS_GRACE_MS as u128 {
+            app.long_press = Some(!GOT_SIGUSR2.load(Ordering::Acquire));
+        }
+        if app.long_press == Some(true) && GOT_SIGUSR2.load(Ordering::Acquire) {
+            app.exit = true;
+            return TimeoutAction::Drop;
+        }
         if now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.refresh_audio();
         }
