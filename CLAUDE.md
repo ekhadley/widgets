@@ -108,7 +108,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 **Features:**
 - Clock (HH:MM:SS + "Wed, February 25"), updates every second via calloop timer
 - Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
-- 2 pomodoro timers — click to start/pause, right-click to reset, scroll to adjust duration (+-60s)
+- 2 pomodoro timers — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s)
 - State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
 - Volume bar (0-200%) via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`)
 - Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`

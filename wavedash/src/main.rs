@@ -449,6 +449,9 @@ struct App {
     // Base durations for reset (scroll-adjusted)
     timer1_base: i64,
     timer2_base: i64,
+    // Config-defined durations (middle-click reset target)
+    timer1_config: i64,
+    timer2_config: i64,
     volume_set_at: u64,
     // Weather
     weather_temp: f64,
@@ -517,11 +520,21 @@ impl App {
 
         // --- Clock (top-left, hero) ---
         let now = chrono_now();
-        let hm_str = format!("{:02}:{:02}", now.0, now.1);
+        let h12 = if now.0 == 0 { 12 } else if now.0 > 12 { now.0 - 12 } else { now.0 };
+        let ampm = if now.0 < 12 { "AM" } else { "PM" };
+        let hm_str = format!("{}:{:02}", h12, now.1);
         let clock_y = lay.clock.y as f32 + 4.0;
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &hm_str, LEFT_MARGIN, clock_y,
             CLOCK_HM_SIZE, lay.clock.w as f32, lay.clock.h as f32, c.clock,
+            &self.font_family, Weight::BOLD);
+        let ampm_size = CLOCK_HM_SIZE * 0.45;
+        let hm_w = measure_text(&mut self.font_system, &hm_str, CLOCK_HM_SIZE, &self.font_family, Weight::BOLD);
+        let ampm_x = LEFT_MARGIN + hm_w + 4.0;
+        let ampm_y = clock_y + CLOCK_HM_SIZE - ampm_size - 2.0;
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            ampm, ampm_x, ampm_y,
+            ampm_size, 50.0, 30.0, c.clock,
             &self.font_family, Weight::BOLD);
 
         // Date below clock (clickable — opens Google Calendar)
@@ -657,8 +670,8 @@ impl App {
         if lay.toggle.contains(mx, my) {
             let arg = if self.is_dim { "1" } else { "0" };
             Command::new("sh").arg("-c")
-                .arg(format!("{}/scripts/dim_toggle.sh {arg}",
-                    home().join(".config/quickshell").display()))
+                .arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}",
+                    home().display()))
                 .spawn().ok();
             self.is_dim = !self.is_dim;
             self.draw();
@@ -737,6 +750,28 @@ impl App {
             let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
             self.timer2_duration = (self.timer2_duration + delta).max(TIMER_SCROLL_STEP);
             self.timer2_base = self.timer2_duration;
+            save_state(&self.state());
+            self.draw();
+        }
+    }
+
+    fn handle_middle_click(&mut self, x: f64, y: f64) {
+        let (mx, my) = (x as u32, y as u32);
+        let lay = layout(self.width, self.height);
+
+        if lay.timer1.contains(mx, my) {
+            self.timer1_duration = self.timer1_config;
+            self.timer1_base = self.timer1_config;
+            self.timer1_started = 0;
+            save_state(&self.state());
+            self.draw();
+            return;
+        }
+
+        if lay.timer2.contains(mx, my) {
+            self.timer2_duration = self.timer2_config;
+            self.timer2_base = self.timer2_config;
+            self.timer2_started = 0;
             save_state(&self.state());
             self.draw();
         }
@@ -995,6 +1030,9 @@ impl PointerHandler for App {
                 PointerEventKind::Press { button: 0x111, .. } => {
                     self.handle_right_click(event.position.0, event.position.1);
                 }
+                PointerEventKind::Press { button: 0x112, .. } => {
+                    self.handle_middle_click(event.position.0, event.position.1);
+                }
                 PointerEventKind::Release { .. } => {}
                 PointerEventKind::Motion { .. } => {
                     let new_hover = self.hover_tile_at(event.position.0, event.position.1);
@@ -1146,6 +1184,8 @@ fn main() {
         hover: HoverTile::None,
         timer1_base: st.timer1_base,
         timer2_base: st.timer2_base,
+        timer1_config: cfg.timer1_duration as i64,
+        timer2_config: cfg.timer2_duration as i64,
         volume_set_at: 0,
         weather_temp: st.weather_temp,
         weather_feels: st.weather_feels,
