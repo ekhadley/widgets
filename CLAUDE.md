@@ -266,6 +266,8 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 ## Todo
 ### grimoire
 - make control backspace delete the entire current search
+- bug: `load_desktop_entries` dedupe direction is inverted. Comment says "local overrides system", but `desktop_dirs()` yields `~/.local/share/applications` first, so the local entry is inserted into `seen` first and then the system entry overwrites it via `items[idx] = item`. Fix: either reverse `desktop_dirs()` order, or skip when `seen` already contains the filename.
+- doesn't parse `Keywords=` from .desktop files, so e.g. searching "discord" won't match `vesktop.desktop` (which has `Keywords=discord;...`).
 
 ### wavedash
 - Timer alert — when pomodoro timers hit zero, notify somehow. Probably just bring up the panel.
