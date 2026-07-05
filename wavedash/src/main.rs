@@ -104,13 +104,16 @@ struct Colors {
     background_alpha: u8,
     border: [u8; 3],
     divider: [u8; 3],
-    sun: [u8; 3],
     clock: [u8; 3],
     accentl: [u8; 3],
     accentr: [u8; 3],
     weather: [u8; 3],
     audio: [u8; 3],
     volume: [u8; 3],
+    brightness: [u8; 3],
+    battery: [u8; 3],
+    battery_charging: [u8; 3],
+    battery_low: [u8; 3],
     notif: [u8; 3],
     timer: [u8; 3],
     dots: [[u8; 3]; 16],
@@ -123,13 +126,16 @@ impl Default for Colors {
             background_alpha: 0xe6, // ~0.9
             border: [0xcd, 0xd6, 0xf4],
             divider: [0xcd, 0xd6, 0xf4],
-            sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
             accentl: [0x89, 0xb4, 0xfa],
             accentr: [0x89, 0xb4, 0xfa],
             weather: [0x94, 0xe2, 0xd5],
             audio: [0xcb, 0xa6, 0xf7],
             volume: [0xcb, 0xa6, 0xf7],
+            brightness: [0xcb, 0xa6, 0xf7],
+            battery: [0xcb, 0xa6, 0xf7],
+            battery_charging: [0xa6, 0xe3, 0xa1],
+            battery_low: [0xf3, 0x8b, 0xa8],
             notif: [0xcb, 0xa6, 0xf7],
             timer: [0xcb, 0xa6, 0xf7],
             dots: [
@@ -172,13 +178,16 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "background" => colors.background = c,
                             "border" => colors.border = c,
                             "divider" => colors.divider = c,
-                            "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
                             "accentl" => colors.accentl = c,
                             "accentr" => colors.accentr = c,
                             "weather" => colors.weather = c,
                             "audio" => colors.audio = c,
                             "volume" => colors.volume = c,
+                            "brightness" => colors.brightness = c,
+                            "battery" => colors.battery = c,
+                            "battery_charging" => colors.battery_charging = c,
+                            "battery_low" => colors.battery_low = c,
                             "notif" => colors.notif = c,
                             "timer" => colors.timer = c,
                             "foreground" => colors.dots[0] = c,
@@ -317,6 +326,42 @@ fn switch_audio(target_mac: &str) {
         .spawn().ok();
 }
 
+// --- Battery ---
+
+// Returns (charge 0.0-1.0, plugged in). Plugged covers "Charging", "Full",
+// and "Not charging" (held at a charge limit) — anything but "Discharging".
+fn read_battery() -> Option<(f32, bool)> {
+    for entry in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
+        let path = entry.path();
+        let Ok(cap) = std::fs::read_to_string(path.join("capacity")) else { continue };
+        let Ok(pct) = cap.trim().parse::<f32>() else { continue };
+        let status = std::fs::read_to_string(path.join("status")).unwrap_or_default();
+        let plugged = status.trim() != "Discharging";
+        return Some(((pct / 100.0).clamp(0.0, 1.0), plugged));
+    }
+    None
+}
+
+// --- Brightness ---
+
+fn read_brightness() -> Option<f32> {
+    for entry in std::fs::read_dir("/sys/class/backlight").ok()?.flatten() {
+        let path = entry.path();
+        let Ok(cur) = std::fs::read_to_string(path.join("brightness")) else { continue };
+        let Ok(max) = std::fs::read_to_string(path.join("max_brightness")) else { continue };
+        let (Ok(cur), Ok(max)) = (cur.trim().parse::<f32>(), max.trim().parse::<f32>()) else { continue };
+        if max > 0.0 { return Some((cur / max).clamp(0.0, 1.0)); }
+    }
+    None
+}
+
+fn set_brightness(frac: f32) {
+    let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u32;
+    Command::new("brightnessctl")
+        .args(["-q", "set", &format!("{pct}%")])
+        .spawn().ok();
+}
+
 // --- Signal (long press detection) ---
 
 static GOT_SIGUSR2: AtomicBool = AtomicBool::new(false);
@@ -340,6 +385,7 @@ const WEATHER_TEMP_SIZE: f32 = 36.0;
 const WEATHER_FEELS_SIZE: f32 = 18.0;
 const TIMER_SIZE: f32 = 32.0;
 const UTIL_ICON_SIZE: f32 = 21.0;
+const BAR_ICON_SIZE: f32 = 17.0;
 const LINE_HEIGHT: f32 = 1.2;
 
 // Hover
@@ -347,6 +393,19 @@ const LINE_HEIGHT: f32 = 1.2;
 // Volume
 const VOL_SCROLL_STEP: f32 = 0.05;
 const VOL_MAX: f32 = 2.0;
+
+// Battery
+const BATTERY_REFRESH: u64 = 5;
+const BATTERY_LOW: f32 = 0.20;
+
+// Brightness (min keeps scroll from blacking out the screen)
+const BRIGHTNESS_SCROLL_STEP: f32 = 0.05;
+const BRIGHTNESS_MIN: f32 = 0.05;
+
+// Bar rows (brightness/battery/volume)
+const BAR_H: u32 = 7;
+const BAR_RADIUS: u32 = 2;
+const BAR_ICON_W: u32 = 25; // icon cell width left of each bar
 
 // Timers
 const TIMER_SCROLL_STEP: i64 = 60;
@@ -368,7 +427,6 @@ impl Rect {
 }
 
 struct Layout {
-    toggle: Rect,
     clock: Rect,
     date: Rect,
     notif: Rect,
@@ -376,6 +434,8 @@ struct Layout {
     timer1: Rect,
     timer2: Rect,
     volume: Rect,
+    battery: Rect,
+    brightness: Rect,
     audio: Rect,
 }
 
@@ -385,22 +445,28 @@ fn layout(w: u32, h: u32) -> Layout {
     // Top band: clock (left) + weather (right)
     let top_y: u32 = 8;
     let top_h: u32 = 78;
-    // Bottom section: 3 rows — icons stacked left, timers stacked right
+    // Bottom section: notif icon row on top; timers keep the old 3-row grid on
+    // the right, while the 3 bars squeeze into the former 2-row span (r1..bottom)
     let sec_y: u32 = 95;
     let sec_h = h - sec_y;
     let row_h = sec_h / 3;
     let r0 = sec_y;
     let r1 = sec_y + row_h;
     let r2 = sec_y + row_h * 2;
+    let bar_h = (h - r1) / 3;
+    let b0 = r1;
+    let b1 = r1 + bar_h;
+    let b2 = r1 + bar_h * 2;
     let date_y = top_y + (CLOCK_HM_SIZE * LINE_HEIGHT + 6.0) as u32;
     Layout {
         clock: Rect { x: lm, y: top_y, w: 240, h: top_h },
         date: Rect { x: lm, y: date_y, w: 150, h: (DATE_SIZE * LINE_HEIGHT + 4.0) as u32 },
         weather: Rect { x: right - 160, y: top_y, w: 160, h: top_h },
-        toggle: Rect { x: lm, y: r0, w: 32, h: row_h },
-        notif: Rect { x: lm, y: r1, w: 32, h: row_h },
-        audio: Rect { x: lm, y: r2, w: 32, h: row_h },
-        volume: Rect { x: lm + 36, y: r2, w: 200, h: row_h },
+        notif: Rect { x: lm, y: r0, w: 32, h: row_h },
+        brightness: Rect { x: lm + BAR_ICON_W, y: b0, w: 200, h: bar_h },
+        battery: Rect { x: lm + BAR_ICON_W, y: b1, w: 200, h: bar_h },
+        volume: Rect { x: lm + BAR_ICON_W, y: b2, w: 200, h: bar_h },
+        audio: Rect { x: lm, y: b2, w: BAR_ICON_W, h: bar_h },
         timer2: Rect { x: right - 120, y: r1, w: 120, h: row_h },
         timer1: Rect { x: right - 120, y: r2, w: 120, h: row_h },
     }
@@ -409,7 +475,7 @@ fn layout(w: u32, h: u32) -> Layout {
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Volume, Audio, Date }
+enum HoverTile { None, Notif, Timer1, Timer2, Volume, Brightness, Audio, Date }
 
 
 // --- App ---
@@ -442,8 +508,6 @@ struct App {
     headphones: bool,
     bt_device_1: String,
     bt_device_2: String,
-    // Theme
-    is_dim: bool,
     // Hover
     hover: HoverTile,
     // Base durations for reset (scroll-adjusted)
@@ -460,6 +524,12 @@ struct App {
     weather_is_day: bool,
     weather_fetched: u64,
     weather_fetch: Option<Child>,
+    // Battery: (charge 0.0-1.0, plugged in); None if no battery present
+    battery: Option<(f32, bool)>,
+    battery_read_at: u64,
+    // Brightness: backlight level 0.0-1.0; None if no backlight present
+    brightness: Option<f32>,
+    brightness_set_at: u64,
     // Notifications
     notif_paused: bool,
     // Long press: None = undecided (grace period), Some(true) = exit on key release, Some(false) = persistent
@@ -577,56 +647,86 @@ impl App {
                 &self.font_family, Weight::BOLD);
         }
 
-        // --- Left icon column (toggle, notif, audio — stacked vertically) ---
-        let icon_x = lay.toggle.x as f32 + 2.0;
-
-        // Toggle icon (sun/moon, top)
-        let icon_char = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
-        let mut icon_color = c.sun;
-        icon_color = hover_color(icon_color, hv == HoverTile::Toggle);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            icon_char, icon_x + 1.0, lay.toggle.y as f32 + 6.0,
-            UTIL_ICON_SIZE, 30.0, 30.0, icon_color,
-            fa, Weight::BLACK);
-
-        // Notif icon (middle)
+        // --- Notif icon (left, above the bars) ---
         let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" };
         let notif_color = hover_color(c.notif, hv == HoverTile::Notif);
         let notif_w_on = measure_text(&mut self.font_system, "\u{f0f3}", UTIL_ICON_SIZE, fa, Weight::BLACK);
         let notif_w_off = measure_text(&mut self.font_system, "\u{f1f6}", UTIL_ICON_SIZE, fa, Weight::BLACK);
         let notif_w_cur = if self.notif_paused { notif_w_off } else { notif_w_on };
-        let notif_x = icon_x + (notif_w_on.max(notif_w_off) - notif_w_cur) / 2.0;
+        let notif_x = lay.notif.x as f32 + 2.0 + (notif_w_on.max(notif_w_off) - notif_w_cur) / 2.0;
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             notif_icon, notif_x, lay.notif.y as f32 + 6.0,
             UTIL_ICON_SIZE, 30.0, 30.0, notif_color,
             fa, Weight::BLACK);
 
+        // --- Bar rows (brightness / battery / volume): icon in the 32px left
+        // cell, pill bar beside it, both centered in the row ---
+        let bar_icon_y = |r: &Rect| r.y as f32 + (r.h as f32 - BAR_ICON_SIZE * LINE_HEIGHT) / 2.0;
+        let bar_y_for = |r: &Rect| r.y + (r.h - BAR_H) / 2;
+        let bar_icon_x = |r: &Rect, icon_w: f32|
+            (r.x - BAR_ICON_W) as f32 + (BAR_ICON_W as f32 - icon_w) / 2.0 - 2.0;
+
+        // Brightness (top, hidden when no backlight)
+        if let Some(frac) = self.brightness {
+            let br_color = hover_color(c.brightness, hv == HoverTile::Brightness);
+            let br_icon = "\u{f185}";
+            let bi_w = measure_text(&mut self.font_system, br_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                br_icon, bar_icon_x(&lay.brightness, bi_w), bar_icon_y(&lay.brightness),
+                BAR_ICON_SIZE, 30.0, 30.0, br_color,
+                fa, Weight::BLACK);
+
+            let bar_y = bar_y_for(&lay.brightness);
+            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.brightness.x, bar_y, lay.brightness.w, BAR_H, BAR_RADIUS, br_color, 50);
+            let fill_w = (frac * lay.brightness.w as f32).round() as u32;
+            if fill_w > 0 {
+                fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.brightness.x, bar_y, fill_w.min(lay.brightness.w), BAR_H, BAR_RADIUS, br_color, 255);
+            }
+        }
+
+        // Battery (middle, hidden when no battery)
+        if let Some((pct, plugged)) = self.battery {
+            let bat_color = if plugged { c.battery_charging }
+                else if pct <= BATTERY_LOW { c.battery_low }
+                else { c.battery };
+            let bat_icon = "\u{f244}";
+            let bi_w = measure_text(&mut self.font_system, bat_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                bat_icon, bar_icon_x(&lay.battery, bi_w), bar_icon_y(&lay.battery),
+                BAR_ICON_SIZE, 30.0, 30.0, bat_color,
+                fa, Weight::BLACK);
+
+            let bar_y = bar_y_for(&lay.battery);
+            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.battery.x, bar_y, lay.battery.w, BAR_H, BAR_RADIUS, bat_color, 50);
+            let fill_w = (pct * lay.battery.w as f32).round() as u32;
+            if fill_w > 0 {
+                fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.battery.x, bar_y, fill_w.min(lay.battery.w), BAR_H, BAR_RADIUS, bat_color, 255);
+            }
+        }
+
         // Audio icon (bottom)
         let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
         let ai_alpha = if self.muted { 0.3 } else { 1.0 };
         let ai_hovered = hv == HoverTile::Audio;
-        let ai_w = measure_text(&mut self.font_system, audio_icon, UTIL_ICON_SIZE, fa, Weight::BLACK);
+        let ai_w = measure_text(&mut self.font_system, audio_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
         let ai_x = lay.audio.x as f32 + (lay.audio.w as f32 - ai_w) / 2.0 - 2.0;
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            audio_icon, ai_x, lay.audio.y as f32 + 6.0,
-            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.audio, ai_hovered), ai_alpha),
+            audio_icon, ai_x, bar_icon_y(&lay.audio),
+            BAR_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.audio, ai_hovered), ai_alpha),
             fa, Weight::BLACK);
 
         // --- Volume bar (same row as audio, rounded fill bar) ---
         let vol_hovered = hv == HoverTile::Volume;
         let vol_color = hover_color(c.volume, vol_hovered);
-        let bar_h: u32 = 8;
         let bar_w = lay.volume.w;
         let bar_x = lay.volume.x;
-        let icon_center_y = lay.audio.y as f32 + 6.0 + UTIL_ICON_SIZE * LINE_HEIGHT / 2.0;
-        let bar_y = (icon_center_y - bar_h as f32 / 2.0) as u32;
-        let bar_r: u32 = bar_h / 2;
+        let bar_y = bar_y_for(&lay.volume);
         let track_alpha: u8 = if self.muted { 25 } else { 50 };
         let fill_alpha: u8 = if self.muted { 77 } else { 255 };
-        fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, bar_w, bar_h, bar_r, vol_color, track_alpha);
+        fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, bar_w, BAR_H, BAR_RADIUS, vol_color, track_alpha);
         let fill_w = ((self.volume / VOL_MAX) * bar_w as f32).round() as u32;
         if fill_w > 0 {
-            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, fill_w.min(bar_w), bar_h, bar_r, vol_color, fill_alpha);
+            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, fill_w.min(bar_w), BAR_H, BAR_RADIUS, vol_color, fill_alpha);
         }
 
         // --- Timers (bottom-right, stacked: short on top, long on bottom) ---
@@ -666,17 +766,6 @@ impl App {
     fn handle_click(&mut self, x: f64, y: f64) {
         let (mx, my) = (x as u32, y as u32);
         let lay = layout(self.width, self.height);
-
-        if lay.toggle.contains(mx, my) {
-            let arg = if self.is_dim { "1" } else { "0" };
-            Command::new("sh").arg("-c")
-                .arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}",
-                    home().display()))
-                .spawn().ok();
-            self.is_dim = !self.is_dim;
-            self.draw();
-            return;
-        }
 
         if lay.notif.contains(mx, my) {
             Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
@@ -734,6 +823,18 @@ impl App {
             self.volume = (self.volume + delta).clamp(0.0, VOL_MAX);
             set_volume(self.volume);
             self.draw();
+            return;
+        }
+
+        if lay.brightness.contains(mx, my) {
+            if let Some(frac) = self.brightness {
+                let delta: f32 = if dy > 0.0 { -BRIGHTNESS_SCROLL_STEP } else { BRIGHTNESS_SCROLL_STEP };
+                let frac = (frac + delta).clamp(BRIGHTNESS_MIN, 1.0);
+                self.brightness = Some(frac);
+                set_brightness(frac);
+                self.brightness_set_at = now_unix();
+                self.draw();
+            }
             return;
         }
 
@@ -802,11 +903,11 @@ impl App {
         let lay = layout(self.width, self.height);
 
         if lay.date.contains(mx, my) { return HoverTile::Date; }
-        if lay.toggle.contains(mx, my) { return HoverTile::Toggle; }
         if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
         if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
         if lay.volume.contains(mx, my) { return HoverTile::Volume; }
+        if lay.brightness.contains(mx, my) { return HoverTile::Brightness; }
         if lay.audio.contains(mx, my) { return HoverTile::Audio; }
         HoverTile::None
     }
@@ -1148,9 +1249,13 @@ fn main() {
     let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
     db.load_font_data(icon_data);
     let icon_family = db.faces().last().expect("icon font file contains no faces").families[0].0.clone();
-    // Load FA Regular for outline icons (same family, Weight::NORMAL)
-    if let Ok(data) = std::fs::read("/usr/share/fonts/OTF/Font Awesome 7 Free-Regular-400.otf") {
-        db.load_font_data(data);
+    // Load FA Regular for outline icons (same family, Weight::NORMAL);
+    // falls back to Solid for its glyphs when neither path exists
+    for dir in [PathBuf::from("/usr/share/fonts/OTF"), home().join(".local/share/fonts")] {
+        if let Ok(data) = std::fs::read(dir.join("Font Awesome 7 Free-Regular-400.otf")) {
+            db.load_font_data(data);
+            break;
+        }
     }
     let font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
 
@@ -1180,7 +1285,6 @@ fn main() {
         headphones,
         bt_device_1: cfg.bt_device_1,
         bt_device_2: cfg.bt_device_2,
-        is_dim: false,
         hover: HoverTile::None,
         timer1_base: st.timer1_base,
         timer2_base: st.timer2_base,
@@ -1193,6 +1297,10 @@ fn main() {
         weather_is_day: st.weather_is_day,
         weather_fetched: st.weather_fetched,
         weather_fetch,
+        battery: read_battery(),
+        battery_read_at: now_unix(),
+        brightness: read_brightness(),
+        brightness_set_at: 0,
         notif_paused,
         long_press: None,
         startup: Instant::now(),
@@ -1211,6 +1319,14 @@ fn main() {
         }
         if now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.refresh_audio();
+        }
+        if now_unix() - app.battery_read_at >= BATTERY_REFRESH {
+            app.battery = read_battery();
+            app.battery_read_at = now_unix();
+        }
+        // Re-read backlight (external hotkeys) unless we just set it
+        if app.brightness.is_some() && now_unix() - app.brightness_set_at >= AUDIO_REFRESH_COOLDOWN {
+            app.brightness = read_brightness();
         }
         // Poll background weather fetch
         let done = match app.weather_fetch.as_mut() {
