@@ -15,7 +15,7 @@ make install          # build + install all widgets
 make install W=wavedash  # build + install just wavedash
 ```
 
-Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates `wavedash_toggle` (a shell script that toggles wavedash on/off via `pkill -x wavedash || wavedash &`).
+Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates a toggle script per widget: `wavedash_toggle` (`pkill -x wavedash || wavedash &`), `evoke_toggle` (`pkill -x -USR1 evoke || evoke &`), and `wallrun_toggle`/`grimoire_toggle` (run the widget unless an instance is already up).
 
 `bench.sh` measures startup latency (time until process enters epoll_wait sleep state) over 1000 runs. Usage: `./bench.sh <widget> [args...]`.
 
@@ -31,7 +31,7 @@ All widgets follow the same architecture:
 - Single `src/main.rs` per widget, typically 800-1400 lines
 - `make install` puts binaries in `~/.local/bin/`
 - Config files go in `~/.config/widgets/<name>.toml`
-- State files go in `~/.local/state/widgets/<name>/` (one file per widget)
+- State files go in `~/.local/state/widgets/<name>.toml` (one file per widget)
 
 ## sctk 0.20 notes
 
@@ -43,6 +43,7 @@ All widgets follow the same architecture:
 - `KeyboardHandler` requires `repeat_key` method (in addition to press/release)
 - `CompositorHandler` requires `surface_enter` and `surface_leave` methods
 - `ProvidesRegistryState` needs `registry_handlers!` macro
+- `CursorShapeManager` (cursor-shape-v1) sets the pointer cursor — create a shape device on `PointerEventKind::Enter` and call `set_shape(serial, Shape::Default)`
 
 ## cosmic-text rendering
 
@@ -51,8 +52,6 @@ Fonts are loaded by file path, not by family name. Each widget's config specifie
 Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `Source::Binary` (i.e. via `load_font_data(Vec<u8>)`, not `load_font_file(path)`).
 
 `render_text()` wraps cosmic-text buffer creation and glyph blitting. Key detail: the `(x, y)` offset passed to `glyph.physical()` must include `run.line_y` (which contains the font's ascent offset). Without it, all text renders ~20-25px too high. The correct call is `glyph.physical((x, y + run.line_y), 1.0)`.
-
-`fill_triangle()` is a general-purpose scanline triangle rasterizer taking 3 float vertices, color, alpha, and y-clip range. Uses pixel-center sampling for both x and y to avoid off-by-one stray pixels. Used for bevelled volume bar endpoints and available for future decorative geometry.
 
 ## Widgets
 
@@ -97,36 +96,35 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 ### wavedash
 
-Floating overlay for Hyprland — clock, weather, pomodoro timers, volume control, theme toggle. Launched/killed to toggle (not persistent).
+Floating overlay for Hyprland — clock, weather, pomodoro timers, volume control, notification pause, theme toggle. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
 **Build:** `make install W=wavedash` installs `wavedash` and `wavedash_toggle` to `~/.local/bin/`. `wavedash_toggle` launches wavedash or kills existing instance.
 
-Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`).
+Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`). 440×235, typographic layout — text directly on a full-bleed background with 4px accent bars along the left and right edges, no tile borders or dividers.
 
 **Features:**
-- Clock (HH:MM:SS + "Wed, February 25"), updates every second via calloop timer
-- Weather tile — current temp + feels-like + condition icon via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl, cached in state for 1 hour.
-- 2 pomodoro timers — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s)
+- Clock — hero 12-hour H:MM with smaller AM/PM suffix, top-left. Date below ("Mon, July 21"), clickable — opens Google Calendar via `xdg-open`.
+- Weather (top-right) — condition icon + current temp, feels-like below, via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for 1 hour.
+- Left icon column, top to bottom: day/night toggle (sun/moon per weather is_day, click runs `dim_toggle.sh`), notification pause (bell/bell-slash, click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), audio device (headphones/speaker)
+- Audio icon — click switches BT devices via `audio_switch.sh`, middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
+- Volume bar (0-200%) beside the audio icon via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`). Muted dims both icon and bar.
+- 2 pomodoro timers stacked bottom-right (short timer on top), right-aligned, dimmed when paused — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s)
 - State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
-- Volume bar (0-200%) via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`)
-- Audio device icon (headphones/speaker), click to switch BT devices via `audio_switch.sh`
-- Day/night toggle via `dim_toggle.sh`
-- 14 color dots from walrs palette (7×2 grid)
-- Hover highlighting on interactive tiles (toggle, timer1, timer2, audio)
+- Hover highlighting on interactive elements (toggle, notif, audio, volume, timers, date)
 - Font Awesome 7 Free Solid (weight BLACK) for filled icons, FA Regular (weight NORMAL) for outline icons. Toggle uses filled sun/moon, weather uses outline.
 - Long press detection — hold the toggle key >300ms to peek (dismisses on release), tap quickly for persistent toggle mode. Uses SIGUSR2 from a Hyprland `bindr` release binding.
 
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
-- `App::handle_click()` / `App::handle_scroll()` / `App::handle_right_click()` / `App::hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
-- Tile geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for 8 tiles: toggle, dots, clock, weather, timer1, timer2, volume, audio
-- Layout: top center row split 2/3 clock | 1/3 empty tile; bottom center row split 2/5 weather | 3/5 timers (horizontally flipped from top). 20px bevelled corners with border on all 4 outside corners.
-- Layout constants: `OUTER` (border), `INNER` (divider), `LEFT_W`, `RIGHT_W`, `TOGGLE_H`, `CLOCK_H`, `AUDIO_H`, `CORNER_BEVEL`. Wavedash is 410×230.
-- Audio control shells out to `wpctl` / scripts in `~/.config/quickshell/scripts/`
+- `App::handle_click()` / `handle_scroll()` / `handle_right_click()` / `handle_middle_click()` / `hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
+- Hit geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for toggle, clock, date, notif, weather, timer1, timer2, volume, audio
+- Layout constants: `WIDTH`/`HEIGHT` (440×235), `ACCENT_W`, `LEFT_MARGIN`, plus a type scale (`CLOCK_HM_SIZE`, `DATE_SIZE`, `WEATHER_ICON_SIZE`, `WEATHER_TEMP_SIZE`, `WEATHER_FEELS_SIZE`, `TIMER_SIZE`, `UTIL_ICON_SIZE`)
+- Shells out to `wpctl`, `dunstctl`, `xdg-open`, `pavucontrol`, `audio_switch.sh` (in `~/.config/quickshell/scripts/`), and `dim_toggle.sh` (in `~/wgmn/scripts/`)
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
-- calloop `Timer` fires every 100ms for clock/timer/weather redraws
+- Time/date via `libc::localtime_r` (no chrono dependency)
+- calloop `Timer` fires every 100ms for clock/timer/weather redraws; also refreshes volume/mute/headphone state, skipped for 1s after a scroll-set to avoid fighting `wpctl`
 - Long press: `SIGUSR2` handler via `sigaction` + `AtomicBool` (same pattern as evoke's SIGUSR1). Grace period (`LONG_PRESS_GRACE_MS = 300`) delays the decision — if signal arrives within grace period, short press (persistent); otherwise long press (exit on release). Requires `bindr = CTRL, Control_R, exec, pkill -USR2 -x wavedash` in Hyprland config.
 
 **Config** — `~/.config/widgets/wavedash.toml` (all optional):
@@ -134,7 +132,6 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 color_file = "~/.cache/wal/colors-wavedash.toml"
 font = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"
 icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
-font_size = 39.0
 timer1_duration = 3600
 timer2_duration = 900
 bt_device_1 = "AC:BF:71:08:A1:D6"
@@ -142,8 +139,9 @@ bt_device_2 = "EC:81:93:AC:8B:60"
 weather_lat = 38.81
 weather_lon = -89.95
 ```
+(`font_size` is also accepted but unused — all text sizes come from the type scale constants.)
 
-**Color keys:** `background`, `background_opacity`, `border`, `divider`, `sun`, `clock`, `weather`, `ui`, `foreground`, `color1`–`color15`
+**Color keys:** `background`, `background_opacity`, `sun`, `clock`, `accentl`, `accentr`, `weather`, `audio`, `volume`, `notif`, `timer`. Also parsed (and emitted by the walrs template) but not currently rendered: `border`, `divider`, `foreground`, `color1`–`color15`.
 
 ### grimoire
 
@@ -158,7 +156,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 - Layer-shell overlay with configurable dimensions
 - Fuzzy search — typed characters filter items by name and comment, scored by character proximity (tighter matches rank first)
 - Configurable multi-column grid layout (items flow left-to-right, top-to-bottom, centered when fewer items than columns)
-- Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete)
+- Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete, Ctrl+Backspace to clear the search)
 - Mouse input (click to select, hover to highlight, scroll wheel)
 - Icon support: PNG and SVG via hicolor theme (both `/usr/share/icons/hicolor/` and `~/.local/share/icons/hicolor/`, including `scalable/` and `symbolic/` SVG dirs, sizes up to 512x512) + `/usr/share/pixmaps`, cached to `~/.cache/thumbnails/grimoire/`. Does NOT do full icon theme lookup (Adwaita, breeze, etc.) — apps using generic themed icon names (e.g. `network-wired`, `preferences-system-network`) won't resolve.
 - .desktop file parsing with field code stripping, Terminal=true support, NoDisplay/Hidden filtering
@@ -265,7 +263,6 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 
 ## Todo
 ### grimoire
-- make control backspace delete the entire current search
 - bug: `load_desktop_entries` dedupe direction is inverted. Comment says "local overrides system", but `desktop_dirs()` yields `~/.local/share/applications` first, so the local entry is inserted into `seen` first and then the system entry overwrites it via `items[idx] = item`. Fix: either reverse `desktop_dirs()` order, or skip when `seen` already contains the filename.
 - doesn't parse `Keywords=` from .desktop files, so e.g. searching "discord" won't match `vesktop.desktop` (which has `Keywords=discord;...`).
 

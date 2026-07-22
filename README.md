@@ -5,7 +5,7 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 ## Widgets
 
 ### wavedash
-Floating status overlay — clock, weather, pomodoro timers, volume control, theme toggle.
+Floating status overlay — clock, weather, pomodoro timers, volume control, notification pause, theme toggle.
 
 ![wavedash](screenshots/wavedash.png)
 
@@ -18,6 +18,9 @@ Image picker overlay — thumbnail grid, fuzzy search, keyboard + mouse nav.
 App launcher / dmenu replacement — filterable list with icons, fuzzy search, frecency sorting.
 
 ![grimoire](screenshots/grimoire.png)
+
+### evoke
+Speech-to-text overlay — records audio with a live visualizer, transcribes via whisper.cpp (CUDA), copies and pastes the result.
 
 ## Stack
 

@@ -759,6 +759,11 @@ impl App {
         let (mx, my) = (x as u32, y as u32);
         let lay = layout(self.width, self.height);
 
+        if lay.audio.contains(mx, my) {
+            Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            return;
+        }
+
         if lay.timer1.contains(mx, my) {
             self.timer1_duration = self.timer1_config;
             self.timer1_base = self.timer1_config;
