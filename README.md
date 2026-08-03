@@ -19,6 +19,9 @@ App launcher / dmenu replacement — filterable list with icons, fuzzy search, f
 
 ![grimoire](screenshots/grimoire.png)
 
+### tincture
+Colorscheme editor — drag a walrs palette around an OKLCH wheel and reapply the theme live.
+
 ### evoke
 Speech-to-text overlay — records audio with a live visualizer, transcribes via whisper.cpp (CUDA), copies and pastes the result.
 
@@ -90,6 +93,14 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `show_comments` | `true` |
 | `search_comments` | `false` |
 | `center_items` | `false` |
+
+### tincture
+
+| key | default |
+| --- | --- |
+| `font` | `~/.local/share/fonts/GoogleSansCode-Regular.ttf` |
+
+Usage: `tincture [image]` — edits the walrs cache entry for that image (defaults to the current wallpaper). Normal window (app_id `tincture`), not an overlay — `windowrule = float, class:^(tincture)$` is worth adding.
 
 ### evoke
 

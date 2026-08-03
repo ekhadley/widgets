@@ -23,7 +23,7 @@ Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also gene
 
 All widgets follow the same architecture:
 
-- **Rust + smithay-client-toolkit 0.20** for Wayland layer-shell surfaces, pointer/keyboard handling, SHM buffers, calloop event loop
+- **Rust + smithay-client-toolkit 0.20** for Wayland layer-shell surfaces (tincture is the exception — an xdg-toplevel window), pointer/keyboard handling, SHM buffers, calloop event loop
 - **tiny-skia** for CPU rendering into the SHM buffer (RGBA pixmap, copied to BGRA for Wayland)
 - **cosmic-text** for text shaping and glyph rendering — fonts are loaded by file path (not system font scanning) via `FontSystem::new_with_locale_and_db()` with a manually built `fontdb::Database`
 - **serde + toml** for config files
@@ -239,6 +239,41 @@ border_width = 1
 **Color keys:** `background`, `background_opacity`, `border`, `waveform`
 
 **Build note:** First build is slow (~1-2 min) as whisper-rs compiles whisper.cpp with CUDA via cmake. Subsequent builds are cached. Requires CUDA toolkit and cmake.
+
+### tincture
+
+Colorscheme editor — drags the 16 extracted colors of a walrs scheme around an OKLCH wheel and reapplies the theme live.
+
+**Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text, serde + toml
+
+Single file: `src/main.rs`. Ordinary xdg-toplevel window (app_id `tincture`) rather than a layer-shell surface, so it can be moved and focused like any other window — min and max size are both pinned to 984×672 (an 820×560 design space times the global scale `S`). Pair it with `windowrule = float, class:^(tincture)$` in the Hyprland config (add `pin` to keep it above other windows).
+
+**Features:**
+- Edits `~/.cache/wal/cache/<sanitized_image_path>` — the walrs cache file (16 hex lines + alpha). Path sanitizing mirrors walrs: strip leading `/`, then `/`→`_` and `.`→`_`. Takes an image path as the sole positional arg; with no arg it reads the current wallpaper from `~/.cache/wal/wal`.
+- OKLCH wheel — hue by angle, chroma by radius, sliced at the primary selection's lightness. Out-of-gamut regions are rendered dimmed instead of clipped, so the sRGB boundary is visible.
+- Lightness strip beside the wheel (neutral ramp) with all 16 colors plotted on it.
+- Drag a dot to move hue/chroma; drag the strip to move lightness. Multi-selection drags relatively — the grabbed color follows the cursor and the rest move by the same delta.
+- Selection: click / shift+click a dot or a rail chip, digits `0`–`9`, Tab / Shift+Tab to cycle. Group keys: `a` all, `n` normal (1–7), `b` bright (9–15), `g` bg+fg (0, 15).
+- Keyboard nudges apply to the whole selection: arrows for lightness/hue, `-`/`=` for chroma, Shift for 5× steps.
+- Applies by writing the cache file and running `walrs -i <image> -W -q` (walrs reads its cache verbatim without `--regen`, so it refills every template, repaints terminals, and runs walrs scripts). Fires on drag release / keypress; a run in flight sets a pending flag polled by a 150ms calloop timer, so edits coalesce instead of stacking walrs invocations.
+- Self-themed: all chrome (background, text, dim text) is painted from the palette being edited, so the window restyles live as you drag.
+- Two text buttons in the top right, both of which close the window: `revert` restores the launch snapshot and applies it, `keep` leaves the current palette on disk. Closing via the compositor keeps. No key quits — Ctrl+Z / Ctrl+Shift+Z undo and redo (snapshots coalesced at 400ms, redo stack cleared by any new edit) and Ctrl+R resets to the launch snapshot without closing. Every exit path flushes synchronously, so the applied theme always matches what was on screen.
+
+**Architecture:**
+- Colors live as `[Lch; 16]` (OKLCH floats) so repeated edits don't quantize through u8; converted to sRGB only for rendering and for writing the cache file.
+- `lch_to_rgb()` gamut-maps by binary-searching chroma down until the color fits sRGB.
+- `ensure_disc()` rasterizes the wheel into an RGBA buffer, cached and keyed by quantized lightness.
+- All layout constants, hit tests and font sizes are in a fixed 820×560 design space. The `S` constant scales design units to pixels inside the drawing primitives (`circle`, `fill_rect`, `render_text`, `measure_text`) and pointer coords are divided by `S` on the way in, so resizing the whole widget is a one-line change and nothing else has to know about it.
+- `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer. Dots via `tiny_skia` paths (anti-aliased), everything else via direct pixel writes.
+- `handle_press()` / `handle_motion()` / `handle_key()` dispatch input; drag state captures the pre-drag palette so motion is always computed as a delta from the press point.
+- `dot_order()` (unselected, then selected, primary last) is shared by the draw loop and the wheel hit test, which walks it backwards — so a click on overlapping dots always resolves to the one painted on top rather than the highest index.
+
+**Config** — `~/.config/widgets/tincture.toml`:
+```toml
+font = "~/.local/share/fonts/GoogleSansCode-Regular.ttf"
+```
+
+No color file — it themes itself from the palette under edit.
 
 ## External scripts
 

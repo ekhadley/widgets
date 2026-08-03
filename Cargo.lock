@@ -1631,6 +1631,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tincture"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "serde",
+ "smithay-client-toolkit",
+ "tiny-skia 0.12.0",
+ "toml",
+ "wayland-client",
+]
+
+[[package]]
 name = "tiny-skia"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
