@@ -106,7 +106,7 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 
 **Features:**
 - Clock — hero 12-hour H:MM with smaller AM/PM suffix, top-left. Date below ("Mon, July 21"), clickable — opens Google Calendar via `xdg-open`.
-- Weather (top-right) — condition icon + current temp, feels-like below, via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for 1 hour.
+- Weather (top-right) — condition icon + current temp, feels-like below, via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for `weather_max_age` seconds (default 3600).
 - Left icon column, top to bottom: day/night toggle (sun/moon per weather is_day, click runs `dim_toggle.sh`), notification pause (bell/bell-slash, click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), audio device (headphones/speaker)
 - Audio icon — click switches BT devices via `audio_switch.sh`, middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
 - Volume bar (0-200%) beside the audio icon via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`). Muted dims both icon and bar.
@@ -138,6 +138,7 @@ bt_device_1 = "AC:BF:71:08:A1:D6"
 bt_device_2 = "EC:81:93:AC:8B:60"
 weather_lat = 38.81
 weather_lon = -89.95
+weather_max_age = 1800   # seconds before the cached weather is refetched
 ```
 (`font_size` is also accepted but unused — all text sizes come from the type scale constants.)
 
@@ -154,7 +155,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard + pointer input.
 **Features:**
 - Two modes: `--drun` (default, app launcher) and `--dmenu` (stdin lines, prints selection to stdout)
 - Layer-shell overlay with configurable dimensions
-- Fuzzy search — typed characters filter items by name and comment, scored by character proximity (tighter matches rank first)
+- Fuzzy search — typed characters filter items by name and comment. `fuzzy_score` is a DP over every alignment of the query into the string (not a greedy first-occurrence scan): extending a contiguous run is free, starting a new run costs the characters skipped plus a penalty that shrinks at a word boundary (`/ _ - . space`, or a lower→upper transition). Lower score wins, and the sort is stable, so equal scores keep frecency order
 - Configurable multi-column grid layout (items flow left-to-right, top-to-bottom, centered when fewer items than columns)
 - Keyboard nav (Left/Right across columns, Up/Down across rows, Enter to select, Escape to exit, Backspace to delete, Ctrl+Backspace to clear the search)
 - Mouse input (click to select, hover to highlight, scroll wheel)

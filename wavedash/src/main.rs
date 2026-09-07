@@ -48,6 +48,7 @@ struct Config {
     bt_device_2: String,
     weather_lat: f64,
     weather_lon: f64,
+    weather_max_age: u64,
 }
 
 impl Default for Config {
@@ -63,6 +64,7 @@ impl Default for Config {
             bt_device_2: "EC:81:93:AC:8B:60".into(),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_max_age: 3600,
         }
     }
 }
@@ -239,8 +241,6 @@ fn save_state(state: &State) {
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     std::fs::write(path, toml::to_string(state).unwrap()).ok();
 }
-
-const WEATHER_MAX_AGE: u64 = 3600;
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -1107,7 +1107,7 @@ fn main() {
     let cfg = load_config();
     let colors = load_colors(cfg.color_file.as_deref());
     let st = load_state(&cfg);
-    let weather_fetch = if cfg.weather_lat != 0.0 && now_unix() - st.weather_fetched > WEATHER_MAX_AGE {
+    let weather_fetch = if cfg.weather_lat != 0.0 && now_unix() - st.weather_fetched > cfg.weather_max_age {
         Command::new("curl")
             .args(["-s", "--max-time", "5", &format!(
                 "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,apparent_temperature,weather_code,is_day&temperature_unit=fahrenheit",

@@ -775,24 +775,34 @@ impl App {
 // --- Rendering helpers ---
 
 // Lower score = better match. None = no match.
+// Considers every alignment of the needle, not just the greedy first-occurrence one, so a
+// tight run late in the string beats a scattered match that starts early.
 fn fuzzy_score(haystack: &str, needle: &str) -> Option<u32> {
-    let h: Vec<char> = haystack.to_lowercase().chars().collect();
-    let n: Vec<char> = needle.to_lowercase().chars().collect();
-    let mut hi = 0;
-    let mut score = 0u32;
-    let mut prev_pos = 0i32;
-    for &nc in &n {
-        loop {
-            if hi >= h.len() { return None; }
-            if h[hi] == nc { break; }
-            hi += 1;
-        }
-        let gap = (hi as i32 - prev_pos).unsigned_abs();
-        score += gap;
-        prev_pos = hi as i32 + 1;
-        hi += 1;
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let orig: Vec<char> = haystack.chars().collect();
+    let h: Vec<char> = orig.iter().map(|&c| lower(c)).collect();
+    let n: Vec<char> = needle.chars().map(lower).collect();
+    if n.is_empty() { return Some(0); }
+
+    // cost[j] = best cost of matching the needle so far with its last char at h[j]. None = impossible.
+    let mut cost: Vec<Option<u32>> = (0..h.len()).map(|j| (h[j] == n[0]).then(|| jump_cost(&orig, None, j))).collect();
+    for &nc in &n[1..] {
+        cost = (0..h.len()).map(|j| {
+            if h[j] != nc { return None; }
+            (0..j).filter_map(|k| Some(cost[k]? + jump_cost(&orig, Some(k), j))).min()
+        }).collect();
     }
-    Some(score)
+    cost.into_iter().flatten().min()
+}
+
+// Cost of matching a needle char at s[j] when the previous one matched at s[k].
+// Extending a run is free; starting one costs the chars skipped to get there plus a penalty
+// that is small at a word boundary.
+fn jump_cost(s: &[char], k: Option<usize>, j: usize) -> u32 {
+    if k.is_some_and(|k| k + 1 == j) { return 0; }
+    let boundary = j == 0 || matches!(s[j - 1], '/' | '_' | '-' | '.' | ' ') || (s[j].is_uppercase() && s[j - 1].is_lowercase());
+    let skipped = k.map_or(0, |k| (j - k - 1) as u32);
+    skipped + if boundary { 1 } else { 5 }
 }
 
 fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3], a: u8) {
