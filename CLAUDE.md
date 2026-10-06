@@ -206,7 +206,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard (Escape to cancel)
 - Transcription via whisper-rs (whisper.cpp built from source with CUDA) in background thread
 - Idle animation during transcription — scrolling sinusoidal wave
 - Copies transcribed text to clipboard (`wl-copy`) and pastes (`ydotool key` Ctrl+V)
-- Escape key exits immediately (exclusive keyboard grab), SIGTERM cancels without transcribing
+- Escape key exits immediately (exclusive keyboard grab). No SIGTERM handler — a plain kill exits without transcribing
 - Model loads after stop signal (instant launch, cancel-friendly)
 - No state persistence
 
@@ -226,7 +226,7 @@ Single file: `src/main.rs`. Layer-shell overlay with keyboard (Escape to cancel)
 color_file = "~/.cache/wal/colors-evoke.toml"
 model = "medium.en"
 models_dir = "~/.local/share/pywhispercpp/models"
-sounds = false
+sounds = false        # accepted but unused
 width = 300
 height = 60
 bar_count = 48
@@ -253,6 +253,7 @@ Single file: `src/main.rs`. Ordinary xdg-toplevel window (app_id `tincture`) rat
 - Edits `~/.cache/wal/cache/<sanitized_image_path>` — the walrs cache file (16 hex lines + alpha). Path sanitizing mirrors walrs: strip leading `/`, then `/`→`_` and `.`→`_`. Takes an image path as the sole positional arg; with no arg it reads the current wallpaper from `~/.cache/wal/wal`.
 - OKLCH wheel — hue by angle, chroma by radius, sliced at the primary selection's lightness. Out-of-gamut regions are rendered dimmed instead of clipped, so the sRGB boundary is visible.
 - Lightness strip beside the wheel (neutral ramp) with all 16 colors plotted on it.
+- Alpha slider in the top-left corner edits the trailing alpha line of the cache file (0-100, what templates see as `{alpha}` / `{opacity}`). Drag or scroll to set. A `preview` toggle beneath it paints tincture's own background at that alpha (only the base fill, not the wheel/strip/text) so the value can be eyeballed against the desktop. Preview is off at launch and not persisted.
 - Drag a dot to move hue/chroma; drag the strip to move lightness. Multi-selection drags relatively — the grabbed color follows the cursor and the rest move by the same delta.
 - Selection: click / shift+click a dot or a rail chip, digits `0`–`9`, Tab / Shift+Tab to cycle. Group keys: `a` all, `n` normal (1–7), `b` bright (9–15), `g` bg+fg (0, 15).
 - Keyboard nudges apply to the whole selection: arrows for lightness/hue, `-`/`=` for chroma, Shift for 5× steps.
@@ -261,7 +262,8 @@ Single file: `src/main.rs`. Ordinary xdg-toplevel window (app_id `tincture`) rat
 - Two text buttons in the top right, both of which close the window: `revert` restores the launch snapshot and applies it, `keep` leaves the current palette on disk. Closing via the compositor keeps. No key quits — Ctrl+Z / Ctrl+Shift+Z undo and redo (snapshots coalesced at 400ms, redo stack cleared by any new edit) and Ctrl+R resets to the launch snapshot without closing. Every exit path flushes synchronously, so the applied theme always matches what was on screen.
 
 **Architecture:**
-- Colors live as `[Lch; 16]` (OKLCH floats) so repeated edits don't quantize through u8; converted to sRGB only for rendering and for writing the cache file.
+- Colors live as `[Lch; 16]` (OKLCH floats) so repeated edits don't quantize through u8; converted to sRGB only for rendering and for writing the cache file. `Scheme = ([Lch; 16], u8)` pairs them with alpha and is the unit of undo/redo/revert/reset.
+- `blit_mask` / `blit_rgba` composite with source-over alpha (pixmap is premultiplied RGBA), so glyph and disc edges stay clean when the background is translucent.
 - `lch_to_rgb()` gamut-maps by binary-searching chroma down until the color fits sRGB.
 - `ensure_disc()` rasterizes the wheel into an RGBA buffer, cached and keyed by quantized lightness.
 - All layout constants, hit tests and font sizes are in a fixed 820×560 design space. The `S` constant scales design units to pixels inside the drawing primitives (`circle`, `fill_rect`, `render_text`, `measure_text`) and pointer coords are divided by `S` on the way in, so resizing the whole widget is a one-line change and nothing else has to know about it.

@@ -60,6 +60,12 @@ const CHIP_GAP: f32 = 5.0;
 const DOT_R: f32 = 11.0;
 const STRIP_DOT_R: f32 = 5.6;
 
+// alpha slider + preview toggle, in the empty corner above the wheel
+const SLIDER_X: f32 = PAD;
+const SLIDER_W: f32 = 160.0;
+const SLIDER_Y: f32 = 18.0;
+const TOGGLE_Y: f32 = 42.0;
+
 /// Both buttons close the window; `revert` restores the palette we launched with first.
 const BUTTONS: [&str; 2] = ["revert", "keep"];
 const BTN_SIZE: f32 = 14.0;
@@ -208,9 +214,13 @@ fn read_scheme(path: &PathBuf) -> ([Lch; 16], u8) {
 
 // --- App ---
 
+/// 16 colors plus the background alpha (0-100), the unit of undo/redo/revert.
+type Scheme = ([Lch; 16], u8);
+
 enum Drag {
     Wheel { start: [Lch; 16], press: (f32, f32) },
     Strip { start: [Lch; 16], press: f32 },
+    Alpha,
 }
 
 struct App {
@@ -232,15 +242,17 @@ struct App {
     image: String,
     scheme_path: PathBuf,
     colors: [Lch; 16],
-    original: [Lch; 16],
     alpha: u8,
-    undos: Vec<[Lch; 16]>,
-    redos: Vec<[Lch; 16]>,
+    original: Scheme,
+    preview: bool,
+    undos: Vec<Scheme>,
+    redos: Vec<Scheme>,
     last_undo: Instant,
     sel: Vec<usize>,
     primary: usize,
     hover: Option<usize>,
     hover_btn: Option<usize>,
+    hover_toggle: bool,
     btn_rects: [(f32, f32, f32, f32); 2],
     drag: Option<Drag>,
     shift: bool,
@@ -263,25 +275,29 @@ fn wheel_ab(x: f32, y: f32) -> (f32, f32) {
 
 fn strip_y(l: f32) -> f32 { STRIP_Y + (1.0 - l.clamp(0.0, 1.0)) * STRIP_H }
 fn strip_l(y: f32) -> f32 { (1.0 - (y - STRIP_Y) / STRIP_H).clamp(0.0, 1.0) }
+fn slider_alpha(x: f32) -> u8 { (((x - SLIDER_X) / SLIDER_W).clamp(0.0, 1.0) * 100.0).round() as u8 }
 
 impl App {
     fn rgb(&self) -> [[u8; 3]; 16] { std::array::from_fn(|i| lch_to_rgb(self.colors[i])) }
+    fn scheme(&self) -> Scheme { (self.colors, self.alpha) }
+    fn set_scheme(&mut self, s: Scheme) { (self.colors, self.alpha) = s; }
 
     // --- editing ---
 
     fn push_undo(&mut self) {
         self.redos.clear();
         if self.last_undo.elapsed() < Duration::from_millis(400) { return; }
-        self.undos.push(self.colors);
+        self.undos.push(self.scheme());
         self.last_undo = Instant::now();
         if self.undos.len() > 100 { self.undos.remove(0); }
     }
 
     fn step_history(&mut self, redo: bool) {
+        let current = self.scheme();
         let (from, to) = if redo { (&mut self.redos, &mut self.undos) } else { (&mut self.undos, &mut self.redos) };
-        let Some(colors) = from.pop() else { return };
-        to.push(self.colors);
-        self.colors = colors;
+        let Some(scheme) = from.pop() else { return };
+        to.push(current);
+        self.set_scheme(scheme);
         self.last_undo = Instant::now() - Duration::from_secs(1);
         self.apply();
     }
@@ -372,6 +388,14 @@ impl App {
         x >= STRIP_X && x <= STRIP_X + STRIP_W && y >= STRIP_Y && y <= STRIP_Y + STRIP_H
     }
 
+    fn in_slider(&self, x: f32, y: f32) -> bool {
+        x >= SLIDER_X - 6.0 && x <= SLIDER_X + SLIDER_W + 6.0 && (y - SLIDER_Y).abs() <= 8.0
+    }
+
+    fn in_toggle(&self, x: f32, y: f32) -> bool {
+        x >= SLIDER_X && x <= SLIDER_X + 70.0 && y >= TOGGLE_Y - 13.0 && y <= TOGGLE_Y + 4.0
+    }
+
     fn btn_at(&self, x: f32, y: f32) -> Option<usize> {
         (0..2).find(|&i| {
             let (bx, by, bw, bh) = self.btn_rects[i];
@@ -380,7 +404,7 @@ impl App {
     }
 
     fn close(&mut self, revert: bool) {
-        if revert { self.colors = self.original; }
+        if revert { self.set_scheme(self.original); }
         self.flush();
         self.exit = true;
     }
@@ -391,7 +415,7 @@ impl App {
             match event.keysym {
                 Keysym::z => self.step_history(false),
                 Keysym::Z => self.step_history(true),
-                Keysym::r => { self.push_undo(); self.colors = self.original; self.apply(); }
+                Keysym::r => { self.push_undo(); self.set_scheme(self.original); self.apply(); }
                 _ => return,
             }
             self.draw();
@@ -424,6 +448,12 @@ impl App {
     fn handle_press(&mut self, x: f32, y: f32) {
         if let Some(i) = self.btn_at(x, y) {
             self.close(i == 0);
+        } else if self.in_slider(x, y) {
+            self.push_undo();
+            self.alpha = slider_alpha(x);
+            self.drag = Some(Drag::Alpha);
+        } else if self.in_toggle(x, y) {
+            self.preview = !self.preview;
         } else if let Some(i) = self.dot_at(x, y) {
             self.select(i, self.shift);
             self.push_undo();
@@ -455,12 +485,15 @@ impl App {
                 let dl = strip_l(y) - press;
                 for &i in &self.sel { self.colors[i].l = (start[i].l + dl).clamp(0.0, 1.0); }
             }
+            Some(Drag::Alpha) => self.alpha = slider_alpha(x),
             None => {
                 let hover = self.dot_at(x, y).or_else(|| self.chip_at(x, y));
                 let hover_btn = self.btn_at(x, y);
-                if hover == self.hover && hover_btn == self.hover_btn { return; }
+                let hover_toggle = self.in_toggle(x, y);
+                if hover == self.hover && hover_btn == self.hover_btn && hover_toggle == self.hover_toggle { return; }
                 self.hover = hover;
                 self.hover_btn = hover_btn;
+                self.hover_toggle = hover_toggle;
             }
         }
         self.draw();
@@ -508,7 +541,8 @@ impl App {
             .create_buffer(PW as i32, PH as i32, PW as i32 * 4, wl_shm::Format::Argb8888)
             .unwrap();
         let mut pixmap = Pixmap::new(PW, PH).unwrap();
-        pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 0xff));
+        let bg_a = if self.preview { (self.alpha as u32 * 255 / 100) as u8 } else { 0xff };
+        pixmap.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], bg_a));
 
         // wheel
         let disc = self.disc.take().unwrap();
@@ -564,6 +598,11 @@ impl App {
             }
         }
 
+        let ax = SLIDER_X + SLIDER_W * self.alpha as f32 / 100.0;
+        fill_rect(pixmap.data_mut(), SLIDER_X, SLIDER_Y - 1.5, SLIDER_W, 3.0, dimmer);
+        fill_rect(pixmap.data_mut(), SLIDER_X, SLIDER_Y - 1.5, ax - SLIDER_X, 3.0, fg);
+        circle(&mut pixmap, ax, SLIDER_Y, 5.0, fg, 0xff);
+
         let mut text = |s: &str, x: f32, y: f32, size: f32, col: [u8; 3]| {
             render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
                 s, x, y, size, col, &self.font_family);
@@ -572,6 +611,10 @@ impl App {
             let col = if self.hover_btn == Some(i) { fg } else { dim };
             text(BUTTONS[i], self.btn_rects[i].0 + 8.0, BTN_BASE, BTN_SIZE, col);
         }
+        // alpha readout beside the slider, preview toggle beneath it
+        text(&format!("alpha {}", self.alpha), SLIDER_X + SLIDER_W + 14.0, SLIDER_Y + 4.5, 12.0, dim);
+        text("preview", SLIDER_X, TOGGLE_Y, 12.0, if self.preview { fg } else if self.hover_toggle { dim } else { dimmer });
+
         // the filename's cap-height top lines up with the top of the lightness strip
         text(&name, PANEL_X, STRIP_Y + 12.0 * 0.72, 12.0, dimmer);
         text(&format!("color{}", self.primary), PANEL_X, 85.0, 20.0, fg);
@@ -671,7 +714,7 @@ fn blit_rgba(data: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, src: &[u8]) {
             data[i]     = (src[si] as u32 * a / 255 + data[i] as u32 * inv / 255) as u8;
             data[i + 1] = (src[si + 1] as u32 * a / 255 + data[i + 1] as u32 * inv / 255) as u8;
             data[i + 2] = (src[si + 2] as u32 * a / 255 + data[i + 2] as u32 * inv / 255) as u8;
-            data[i + 3] = 0xff;
+            data[i + 3] = (a + data[i + 3] as u32 * inv / 255) as u8;
         }
     }
 }
@@ -728,7 +771,7 @@ fn blit_mask(data: &mut [u8], x0: i32, y0: i32, w: i32, h: i32, mask: &[u8], col
             data[i]     = ((color[0] as u32 * a + data[i] as u32 * inv) / 255) as u8;
             data[i + 1] = ((color[1] as u32 * a + data[i + 1] as u32 * inv) / 255) as u8;
             data[i + 2] = ((color[2] as u32 * a + data[i + 2] as u32 * inv) / 255) as u8;
-            data[i + 3] = 0xff;
+            data[i + 3] = (a + data[i + 3] as u32 * inv / 255) as u8;
         }
     }
 }
@@ -805,7 +848,8 @@ impl PointerHandler for App {
                 PointerEventKind::Motion { .. } => self.handle_motion(x, y),
                 PointerEventKind::Axis { ref vertical, .. } => {
                     let d = if vertical.absolute > 0.0 { -1.0 } else { 1.0 };
-                    if self.in_strip(x, y) { self.nudge(0.01 * d, 0.0, 0.0); }
+                    if self.in_slider(x, y) { self.push_undo(); self.alpha = (self.alpha as i32 + d as i32).clamp(0, 100) as u8; self.apply(); }
+                    else if self.in_strip(x, y) { self.nudge(0.01 * d, 0.0, 0.0); }
                     else { self.nudge(0.0, 0.005 * d, 0.0); }
                     self.draw();
                 }
@@ -909,8 +953,9 @@ fn main() {
         image,
         scheme_path,
         colors,
-        original: colors,
         alpha,
+        original: (colors, alpha),
+        preview: false,
         undos: Vec::new(),
         redos: Vec::new(),
         last_undo: Instant::now() - Duration::from_secs(1),
@@ -918,6 +963,7 @@ fn main() {
         primary: 0,
         hover: None,
         hover_btn: None,
+        hover_toggle: false,
         btn_rects: [(0.0, 0.0, 0.0, 0.0); 2],
         drag: None,
         shift: false,

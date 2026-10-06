@@ -44,7 +44,7 @@ make install W=wavedash  # build + install just one
 ## Config
 
 - Config files: `~/.config/widgets/<name>.toml`
-- State files: `~/.local/state/widgets/<name>/`
+- State files: `~/.local/state/widgets/<name>.toml`
 - Color templates: `~/.config/walrs/templates/`
 
 All TOML keys are optional. Background opacity is **not** a TOML key — set `background_opacity = 0.0..1.0` in the widget's color file (generated from its walrs template).
@@ -56,13 +56,14 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `color_file` | `~/.cache/wal/colors-wavedash.toml` |
 | `font` | `~/.local/share/fonts/GoogleSansCode-Bold.ttf` |
 | `icon_font` | `/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf` |
-| `font_size` | `39.0` |
+| `font_size` | `39.0` (accepted but unused) |
 | `timer1_duration` | `3600` |
 | `timer2_duration` | `900` |
 | `bt_device_1` | `AC:BF:71:08:A1:D6` |
 | `bt_device_2` | `EC:81:93:AC:8B:60` |
 | `weather_lat` | `0.0` |
 | `weather_lon` | `0.0` |
+| `weather_max_age` | `3600` |
 
 ### wallrun
 
@@ -109,7 +110,7 @@ Usage: `tincture [image]` — edits the walrs cache entry for that image (defaul
 | `color_file` | `~/.cache/wal/colors-evoke.toml` |
 | `model` | `medium.en` |
 | `models_dir` | `~/.local/share/pywhispercpp/models` |
-| `sounds` | `false` |
+| `sounds` | `false` (accepted but unused) |
 | `width` | `300` |
 | `height` | `60` |
 | `bar_count` | `48` |
