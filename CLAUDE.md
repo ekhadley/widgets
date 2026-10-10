@@ -96,7 +96,7 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 ### wavedash
 
-Floating overlay for Hyprland — clock, weather, pomodoro timers, volume control, notification pause, theme toggle. Launched/killed to toggle (not persistent).
+Floating overlay for Hyprland — clock, weather, pomodoro timers with an alarm, volume control, notification pause, theme toggle. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, libc, serde + toml
 
@@ -110,21 +110,23 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 - Left icon column, top to bottom: day/night toggle (sun/moon per weather is_day, click runs `dim_toggle.sh`), notification pause (bell/bell-slash, click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), audio device (headphones/speaker)
 - Audio icon — click switches BT devices via `audio_switch.sh`, middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
 - Volume bar (0-200%) beside the audio icon via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`). Muted dims both icon and bar.
-- 2 pomodoro timers stacked bottom-right (short timer on top), right-aligned, dimmed when paused — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s)
-- State persists to `~/.local/state/widgets/wavedash.toml` (timers + weather cache survive close/reopen)
-- Hover highlighting on interactive elements (toggle, notif, audio, volume, timers, date)
+- 2 pomodoro timers stacked bottom-right (short timer on top), right-aligned, dimmed when paused — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s). A finished timer keeps counting negative and breathes in the right accent color until clicked, which resets it to its base.
+- Alarm — alarm-clock icon above the timers toggles it (persisted in state, dimmed when off). Turning it on plays `alert_sound` once as a preview; turning it off also stops any playing alarm. When a timer reaches zero with the alarm on, a detached watcher process plays the sound with `pw-play` and launches the panel if it isn't up.
+- State persists to `~/.local/state/widgets/wavedash.toml` (timers, alarm toggle and weather cache survive close/reopen)
+- Hover highlighting on interactive elements (toggle, notif, audio, volume, alarm, timers, date)
 - Font Awesome 7 Free Solid (weight BLACK) for filled icons, FA Regular (weight NORMAL) for outline icons. Toggle uses filled sun/moon, weather uses outline.
 - Long press detection — hold the toggle key >300ms to peek (dismisses on release), tap quickly for persistent toggle mode. Uses SIGUSR2 from a Hyprland `bindr` release binding.
 
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
 - `App::handle_click()` / `handle_scroll()` / `handle_right_click()` / `handle_middle_click()` / `hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
-- Hit geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for toggle, clock, date, notif, weather, timer1, timer2, volume, audio
+- Hit geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for toggle, clock, date, notif, weather, alert, timer1, timer2, volume, audio
+- Alarm: `spawn_alarm(n, started)` runs when a timer starts and at launch for any timer still running — it pkills any existing `wavedash --alarm n` watcher and starts a fresh one, so there is never more than one per timer. `run_alarm()` renames its process to `wavedash-alarm` (so the toggle script's `pkill -x wavedash` leaves it alone), polls the state file every 500ms, exits as soon as the timer's `started` changes (pause, reset, restart), and fires when remaining ≤ 0 and `alert` is set. It keeps polling while the sound plays, so stopping the timer or switching the alarm off cuts the sound.
 - Layout constants: `WIDTH`/`HEIGHT` (440×235), `ACCENT_W`, `LEFT_MARGIN`, plus a type scale (`CLOCK_HM_SIZE`, `DATE_SIZE`, `WEATHER_ICON_SIZE`, `WEATHER_TEMP_SIZE`, `WEATHER_FEELS_SIZE`, `TIMER_SIZE`, `UTIL_ICON_SIZE`)
-- Shells out to `wpctl`, `dunstctl`, `xdg-open`, `pavucontrol`, `audio_switch.sh` (in `~/.config/quickshell/scripts/`), and `dim_toggle.sh` (in `~/wgmn/scripts/`)
+- Shells out to `wpctl`, `dunstctl`, `xdg-open`, `pavucontrol`, `pw-play`, `pgrep`/`pkill`, `audio_switch.sh` (in `~/.config/quickshell/scripts/`), and `dim_toggle.sh` (in `~/wgmn/scripts/`)
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
 - Time/date via `libc::localtime_r` (no chrono dependency)
-- calloop `Timer` fires every 100ms for clock/timer/weather redraws; also refreshes volume/mute/headphone state, skipped for 1s after a scroll-set to avoid fighting `wpctl`
+- calloop `Timer` fires every 33ms for clock/timer/weather redraws (fast enough for the finished-timer pulse to be smooth); volume/mute/headphone state is refreshed every 500ms, skipped for 1s after a scroll-set to avoid fighting `wpctl`
 - Long press: `SIGUSR2` handler via `sigaction` + `AtomicBool` (same pattern as evoke's SIGUSR1). Grace period (`LONG_PRESS_GRACE_MS = 300`) delays the decision — if signal arrives within grace period, short press (persistent); otherwise long press (exit on release). Requires `bindr = CTRL, Control_R, exec, pkill -USR2 -x wavedash` in Hyprland config.
 
 **Config** — `~/.config/widgets/wavedash.toml` (all optional):
@@ -139,6 +141,7 @@ bt_device_2 = "EC:81:93:AC:8B:60"
 weather_lat = 38.81
 weather_lon = -89.95
 weather_max_age = 1800   # seconds before the cached weather is refetched
+alert_sound = "~/.config/widgets/wavedash-alarm.wav"   # played by pw-play when a timer hits zero with the alarm on
 ```
 (`font_size` is also accepted but unused — all text sizes come from the type scale constants.)
 
@@ -319,7 +322,6 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - doesn't parse `Keywords=` from .desktop files, so e.g. searching "discord" won't match `vesktop.desktop` (which has `Keywords=discord;...`).
 
 ### wavedash
-- Timer alert — when pomodoro timers hit zero, notify somehow. Probably just bring up the panel.
 - Network tile — wifi SSID + signal strength or ethernet indicator
 - Better layout abstractions — reduce overhead while adding consistency and styling
 

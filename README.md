@@ -5,7 +5,7 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 ## Widgets
 
 ### wavedash
-Floating status overlay — clock, weather, pomodoro timers, volume control, notification pause, theme toggle.
+Floating status overlay — clock, weather, pomodoro timers with an alarm, volume control, notification pause, theme toggle.
 
 ![wavedash](screenshots/wavedash.png)
 
@@ -64,6 +64,7 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `weather_lat` | `0.0` |
 | `weather_lon` | `0.0` |
 | `weather_max_age` | `3600` |
+| `alert_sound` | `~/.config/widgets/wavedash-alarm.wav` |
 
 ### wallrun
 
