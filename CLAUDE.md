@@ -194,52 +194,66 @@ center_items = false
 
 ### evoke
 
-Speech-to-text overlay — records audio, transcribes via whisper.cpp (CUDA), copies text to clipboard and pastes.
+Speech-to-text overlay — streams the mic to OpenAI's realtime transcription API, shows the words live in an editable text box, optionally cleans them up with an LLM, then types the result into the window you were in (or copies it).
 
-**Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, whisper-rs (CUDA), serde + toml
+**Stack:** smithay-client-toolkit 0.20, wayland-client, cosmic-text, tungstenite (rustls/ring), ureq, serde_json, data-encoding, serde + toml
 
-Single file: `src/main.rs`. Layer-shell overlay with keyboard (Escape to cancel). No font/text rendering — pure geometry.
+Single file: `src/main.rs`. Layer-shell overlay with exclusive keyboard + pointer input. Draws straight into the BGRA SHM buffer with one `blend()` helper (no tiny-skia).
 
 **Features:**
-- Records audio via `pw-record` subprocess (16kHz mono s16le), piped to stdout
-- Real-time audio visualizer — amplitude bars driven by RMS ring buffer
-- Transcription via whisper-rs (whisper.cpp built from source with CUDA) in background thread
-- Idle animation during transcription — scrolling sinusoidal wave
-- Copies transcribed text to clipboard (`wl-copy`) and pastes (`ydotool key` Ctrl+V)
-- Escape key exits immediately (exclusive keyboard grab). No SIGTERM handler — a plain kill exits without transcribing
-- Model loads after stop signal (instant launch, cancel-friendly)
-- No state persistence
+- Records via `pw-record` (24 kHz mono s16le — the only rate the realtime API accepts); a small waveform strip shows the level
+- One OpenAI realtime transcription session per dictation (`wss://api.openai.com/v1/realtime?intent=transcription`, model `gpt-live-transcribe`). Words arrive as `...transcription.delta` events while you speak and are appended at the end of the text box as normal editable text; the cursor only follows if it was already at the end
+- Editable while dictating: cosmic-text `Editor` — arrows/Home/End (Shift selects, Ctrl by word/buffer), Backspace/Delete/Ctrl+Backspace, Ctrl+A/C/X/V (wl-copy / wl-paste), Ctrl+Z / Ctrl+Shift+Z (edits within 1s merge into one undo step), click/double/triple-click/drag. The box grows upward to `max_lines`, then scrolls with the cursor
+- Enter (or the `send` label, or SIGUSR1) finishes: stops the mic, waits for the final transcript, applies `[replace]` whole-word fixes, then sends. Shift+Enter inserts a newline, Esc quits, the `copy` label copies and quits
+- Optional LLM cleanup (`[cleanup]` section): the first Enter sends the text to `{base_url}/chat/completions` and replaces it in place as one undoable change (label shows `clean`, then `send`); Ctrl+Z restores the original, the next Enter sends. Editing is locked while it runs
+- Sending: waits until no key is held and the pointer has been still for 500ms, drops the layer surface (Hyprland refocuses the previous window), then delivers. `send = "ime"` binds `zwp_input_method_v2` and `commit_string`s into the focused text field (no clipboard; newlines become spaces when the field reports content purpose Terminal). `send = "paste"` does `wl-copy` + `hl.dsp.send_shortcut` (Ctrl+Shift+V for terminals) to the window captured at launch. If delivery fails the overlay comes back with the error and the text intact
+- Errors (network, API, cleanup) show in the top row in the border color and are printed to stderr; the text is kept
+- Usage totals: the usage reports the API already returns (the transcription `completed` event and the cleanup response) are summed into `~/.local/state/widgets/evoke.toml` — e.g. `transcribe_seconds` (or token counts, depending on the model), `cleanup_prompt_tokens`, `cleanup_completion_tokens`, and request counts. A dictation cancelled before its transcript completes gets no usage report, so it isn't counted
 
 **Architecture:**
-- `App::draw()` renders amplitude bars (recording) or sine wave (transcribing) to `tiny_skia::Pixmap`
-- `App::process_audio_chunk()` parses s16le from pw-record stdout, updates ring buffer
-- `App::stop_and_transcribe()` kills pw-record, spawns transcription thread
-- calloop `Generic` source watches pw-record stdout fd (non-blocking via `libc::fcntl`)
-- calloop `Timer` at ~30fps redraws visualizer, polls SIGUSR1 flag and transcription channel
-- SIGUSR1 via `libc::sigaction` + `AtomicBool`, checked in timer callback
-- Transcription result received via `mpsc::channel` from background thread
+- `Phase` state machine: `Recording` → `Finishing` (mic stopped, waiting for `completed`) → `Idle` (editing) → `Cleaning` / `Sending`. `request(Then)` advances it from Enter, the buttons and SIGUSR1; `on_down()` handles messages from worker threads
+- Network thread `stream()`: tungstenite over a `TcpStream` with a 10ms read timeout, so one loop alternates reading events and draining the audio `mpsc` channel. The channel doubles as the queue for audio recorded before `session.updated`, so launch stays instant. Events come back over a calloop `channel`
+- Stopping kills pw-record; the pipe EOF in the calloop `Generic` source sends the remaining audio plus a single `input_audio_buffer.commit`. The `completed` event is only the "done" signal — the text already in the box is kept (the user may have edited it)
+- `cleanup()` runs in a thread (ureq, blocking) and reports back through the same channel
+- calloop `Timer` at ~30fps: SIGUSR1 flag, the 10s finishing timeout, the 2s input-method deadline, and redraws (every tick while recording, otherwise only when `dirty`)
 
-**Toggle script** (`evoke_toggle`): `pkill -x -USR1 evoke || evoke &` — sends SIGUSR1 to stop+transcribe if running, launches if not. Note: must use `pkill -x` (exact match) to avoid matching the toggle script process itself.
+**Realtime API facts (measured):** `gpt-live-transcribe` rejects server VAD (`turn_detection` must be null — the client commits); deltas are never revised (the final transcript equals the concatenated deltas apart from a leading space); committing at every pause hurts accuracy (context is lost across commits), so evoke commits once at the end; commit → `completed` takes ~0.4-0.6s even for a 99s turn; `delay = "minimal"` makes words appear ~0.7s sooner than the default; `keywords` helps but is not reliable (hence `[replace]`); sessions expire 60 minutes after creation. Costs $0.017/min.
 
-**Config** — `~/.config/widgets/evoke.toml` (all optional):
+**Input-method notes:** Hyprland 0.56.2 ignores the input-method commit serial and relays each commit immediately, so long text is committed in 2000-byte pieces (Wayland messages are capped at 4 KiB). Only one input method can be bound per seat — a running fcitx5/ibus IME makes evoke get `unavailable`.
+
+**Toggle script** (`evoke_toggle`): `pkill -x -USR1 evoke || evoke &` — a second SUPER+G sends SIGUSR1, which acts like Enter (evoke waits for Super to be released before handing focus back). Must use `pkill -x` (exact match) to avoid matching the toggle script process itself.
+
+**Config** — `~/.config/widgets/evoke.toml`:
 ```toml
 color_file = "~/.cache/wal/colors-evoke.toml"
-model = "medium.en"
-models_dir = "~/.local/share/pywhispercpp/models"
-sounds = false        # accepted but unused
-width = 300
-height = 60
-bar_count = 48
-bar_width = 4
-bar_gap = 2
-margin = 0.25          # bottom margin as fraction of screen height
-scale = 4.0            # amplitude multiplier for visualizer
-border_width = 1
+openai_api_key = "sk-..."
+font = "~/.local/share/fonts/GoogleSansCode-Regular.ttf"
+font_size = 16.0
+width = 600
+max_lines = 8
+margin = 0.1             # bottom margin as fraction of screen height
+border_width = 2
+bar_width = 2
+bar_gap = 1
+scale = 20.0             # amplitude multiplier for the waveform
+model = "gpt-live-transcribe"
+delay = "minimal"        # minimal|low|medium|high|xhigh
+language = "en"
+keywords = ["Hyprland"]  # sent to the transcription model and the cleanup prompt
+send = "ime"             # or "paste"
+
+[replace]                # whole-word, case-sensitive, applied when the transcript is final
+Hyperland = "Hyprland"
+
+[cleanup]                # optional; omit to send the raw text
+base_url = "https://api.openai.com/v1"   # any OpenAI-compatible chat/completions endpoint
+model = "gpt-6-luna"
+reasoning_effort = "none"                # only sent if set
+# api_key = "..."                        # defaults to openai_api_key
+# prompt = "..."                         # replaces the built-in cleanup prompt
 ```
 
-**Color keys:** `background`, `background_opacity`, `border`, `waveform`
-
-**Build note:** First build is slow (~1-2 min) as whisper-rs compiles whisper.cpp with CUDA via cmake. Subsequent builds are cached. Requires CUDA toolkit and cmake.
+**Color keys:** `background`, `background_opacity`, `border` (also used for errors), `waveform`, `text`, `dim` (labels, status, placeholder), `selection`
 
 ### tincture
 

@@ -4,10 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cosmic-text = "0.17.1"
+data-encoding = "2.11.1"
 libc = "0.2.181"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
 smithay-client-toolkit = { version = "0.20.0", features = ["calloop"] }
-tiny-skia = "0.12.0"
 toml = "0.8"
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 wayland-client = "0.31.12"
-whisper-rs = { version = "0.16", features = ["cuda"] }

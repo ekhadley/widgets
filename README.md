@@ -23,7 +23,7 @@ App launcher / dmenu replacement — filterable list with icons, fuzzy search, f
 Colorscheme editor — drag a walrs palette around an OKLCH wheel and reapply the theme live.
 
 ### evoke
-Speech-to-text overlay — records audio with a live visualizer, transcribes via whisper.cpp (CUDA), copies and pastes the result.
+Speech-to-text overlay — streams the mic to OpenAI's realtime transcription, shows the words live in an editable box, optionally cleans them up with an LLM, then types the result into the window you were in.
 
 ## Stack
 
@@ -108,14 +108,22 @@ Usage: `tincture [image]` — edits the walrs cache entry for that image (defaul
 | key | default |
 | --- | --- |
 | `color_file` | `~/.cache/wal/colors-evoke.toml` |
-| `model` | `medium.en` |
-| `models_dir` | `~/.local/share/pywhispercpp/models` |
-| `sounds` | `false` (accepted but unused) |
-| `width` | `300` |
-| `height` | `60` |
-| `bar_count` | `48` |
-| `bar_width` | `4` |
-| `bar_gap` | `2` |
-| `margin` | `0.25` |
-| `scale` | `4.0` |
-| `border_width` | `1` |
+| `openai_api_key` | (required) |
+| `font` | `~/.local/share/fonts/GoogleSansCode-Regular.ttf` |
+| `font_size` | `16.0` |
+| `width` | `600` |
+| `max_lines` | `8` |
+| `margin` | `0.1` |
+| `border_width` | `2` |
+| `bar_width` | `2` |
+| `bar_gap` | `1` |
+| `scale` | `20.0` |
+| `model` | `gpt-live-transcribe` |
+| `delay` | `minimal` |
+| `language` | `en` |
+| `keywords` | `[]` |
+| `send` | `ime` (or `paste`) |
+| `[replace]` | whole-word fixes, e.g. `Hyperland = "Hyprland"` |
+| `[cleanup]` | optional LLM cleanup: `base_url` (`https://api.openai.com/v1`), `model` (`gpt-6-luna`), `reasoning_effort`, `api_key`, `prompt` |
+
+Usage totals (audio seconds / tokens as reported by the API) accumulate in `~/.local/state/widgets/evoke.toml`.
