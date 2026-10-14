@@ -5,7 +5,7 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 ## Widgets
 
 ### wavedash
-Floating status overlay — clock, weather, pomodoro timers, volume control, theme toggle.
+Floating status overlay — clock, weather, pomodoro timers with an alarm, volume control, notification pause, theme toggle.
 
 ![wavedash](screenshots/wavedash.png)
 
@@ -18,6 +18,12 @@ Image picker overlay — thumbnail grid, fuzzy search, keyboard + mouse nav.
 App launcher / dmenu replacement — filterable list with icons, fuzzy search, frecency sorting.
 
 ![grimoire](screenshots/grimoire.png)
+
+### tincture
+Colorscheme editor — drag a walrs palette around an OKLCH wheel and reapply the theme live.
+
+### evoke
+Speech-to-text overlay — streams the mic to OpenAI's realtime transcription, shows the words live in an editable box, optionally cleans them up with an LLM, then types the result into the window you were in.
 
 ## Stack
 
@@ -38,7 +44,7 @@ make install W=wavedash  # build + install just one
 ## Config
 
 - Config files: `~/.config/widgets/<name>.toml`
-- State files: `~/.local/state/widgets/<name>/`
+- State files: `~/.local/state/widgets/<name>.toml`
 - Color templates: `~/.config/walrs/templates/`
 
 All TOML keys are optional. Background opacity is **not** a TOML key — set `background_opacity = 0.0..1.0` in the widget's color file (generated from its walrs template).
@@ -50,13 +56,15 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `color_file` | `~/.cache/wal/colors-wavedash.toml` |
 | `font` | `~/.local/share/fonts/GoogleSansCode-Bold.ttf` |
 | `icon_font` | `/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf` |
-| `font_size` | `39.0` |
+| `font_size` | `39.0` (accepted but unused) |
 | `timer1_duration` | `3600` |
 | `timer2_duration` | `900` |
 | `bt_device_1` | `AC:BF:71:08:A1:D6` |
 | `bt_device_2` | `EC:81:93:AC:8B:60` |
 | `weather_lat` | `0.0` |
 | `weather_lon` | `0.0` |
+| `weather_max_age` | `3600` |
+| `alert_sound` | `~/.config/widgets/wavedash-alarm.wav` |
 
 ### wallrun
 
@@ -88,19 +96,35 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `search_comments` | `false` |
 | `center_items` | `false` |
 
+### tincture
+
+| key | default |
+| --- | --- |
+| `font` | `~/.local/share/fonts/GoogleSansCode-Regular.ttf` |
+
+Usage: `tincture [image]` — edits the walrs cache entry for that image (defaults to the current wallpaper). Normal window (app_id `tincture`), not an overlay — `windowrule = float, class:^(tincture)$` is worth adding.
+
 ### evoke
 
 | key | default |
 | --- | --- |
 | `color_file` | `~/.cache/wal/colors-evoke.toml` |
-| `model` | `medium.en` |
-| `models_dir` | `~/.local/share/pywhispercpp/models` |
-| `sounds` | `false` |
-| `width` | `300` |
-| `height` | `60` |
-| `bar_count` | `48` |
-| `bar_width` | `4` |
-| `bar_gap` | `2` |
-| `margin` | `0.25` |
-| `scale` | `4.0` |
-| `border_width` | `1` |
+| `openai_api_key` | (required) |
+| `font` | `~/.local/share/fonts/GoogleSansCode-Regular.ttf` |
+| `font_size` | `16.0` |
+| `width` | `600` |
+| `max_lines` | `8` |
+| `margin` | `0.1` |
+| `border_width` | `2` |
+| `bar_width` | `2` |
+| `bar_gap` | `1` |
+| `scale` | `20.0` |
+| `model` | `gpt-live-transcribe` |
+| `delay` | `minimal` |
+| `language` | `en` |
+| `keywords` | `[]` |
+| `send` | `ime` (or `paste`) |
+| `[replace]` | whole-word fixes, e.g. `Hyperland = "Hyprland"` |
+| `[cleanup]` | optional LLM cleanup: `base_url` (`https://api.openai.com/v1`), `model` (`gpt-6-luna`), `reasoning_effort`, `api_key`, `prompt` |
+
+Usage totals (audio seconds / tokens as reported by the API) accumulate in `~/.local/state/widgets/evoke.toml`.

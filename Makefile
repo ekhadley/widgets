@@ -1,5 +1,5 @@
 PREFIX ?= $(HOME)/.local
-WIDGETS = wallrun grimoire wavedash evoke
+WIDGETS = wallrun grimoire wavedash evoke tincture
 
 install:
 ifdef W

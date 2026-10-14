@@ -48,6 +48,8 @@ struct Config {
     bt_device_2: String,
     weather_lat: f64,
     weather_lon: f64,
+    weather_max_age: u64,
+    alert_sound: String,
 }
 
 impl Default for Config {
@@ -63,6 +65,8 @@ impl Default for Config {
             bt_device_2: "EC:81:93:AC:8B:60".into(),
             weather_lat: 0.0,
             weather_lon: 0.0,
+            weather_max_age: 3600,
+            alert_sound: "~/.config/widgets/wavedash-alarm.wav".into(),
         }
     }
 }
@@ -222,6 +226,7 @@ struct State {
     #[serde(default)] weather_code: u32,
     #[serde(default)] weather_is_day: bool,
     #[serde(default)] weather_fetched: u64,
+    #[serde(default)] alert: bool,
 }
 
 fn state_path() -> PathBuf {
@@ -249,8 +254,6 @@ fn save_state(state: &State) {
     std::fs::write(path, toml::to_string(state).unwrap()).ok();
 }
 
-const WEATHER_MAX_AGE: u64 = 3600;
-
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
@@ -266,6 +269,39 @@ fn format_timer(secs: i64) -> String {
     let m = abs / 60;
     let s = abs % 60;
     format!("{sign}{m}:{s:02}")
+}
+
+// --- Alarm ---
+// A detached `wavedash --alarm <n> <started>` process watches timer n in the state file and plays
+// the alert sound when it reaches zero. Pausing or restarting the timer changes `started`, which
+// makes the watcher exit, so nothing has to be cancelled explicitly.
+
+fn spawn_alarm(n: u8, started: u64) {
+    Command::new("pkill").args(["-f", &format!("wavedash --alarm {n}")]).status().unwrap();
+    Command::new(std::env::current_exe().unwrap()).args(["--alarm", &n.to_string(), &started.to_string()])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+}
+
+fn run_alarm(n: u8, started: u64, cfg: &Config) {
+    // Renamed so the toggle script's `pkill -x wavedash` closes the panel without taking the watcher down
+    unsafe { libc::prctl(libc::PR_SET_NAME, b"wavedash-alarm\0".as_ptr()); }
+    let mut player: Option<Child> = None;
+    loop {
+        let st = load_state(cfg);
+        let (t_started, t_dur) = if n == 1 { (st.timer1_started, st.timer1_duration) } else { (st.timer2_started, st.timer2_duration) };
+        if t_started != started { break; }
+        if let Some(p) = player.as_mut() {
+            if p.try_wait().unwrap().is_some() { return; }
+        } else if timer_remaining(t_dur, t_started) <= 0 {
+            if !st.alert { return; }
+            if !Command::new("pgrep").args(["-x", "wavedash"]).status().unwrap().success() {
+                Command::new(std::env::current_exe().unwrap()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            }
+            player = Some(Command::new("pw-play").arg(expand_path(&cfg.alert_sound)).spawn().unwrap());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if let Some(mut p) = player { p.kill().unwrap(); }
 }
 
 
@@ -411,7 +447,8 @@ const BAR_ICON_W: u32 = 25; // icon cell width left of each bar
 const TIMER_SCROLL_STEP: i64 = 60;
 
 // Timing
-const TICK_MS: u64 = 100;
+const TICK_MS: u64 = 33;
+const AUDIO_REFRESH_MS: u128 = 500;
 const AUDIO_REFRESH_COOLDOWN: u64 = 1;
 const LONG_PRESS_GRACE_MS: u64 = 300;
 
@@ -433,6 +470,7 @@ struct Layout {
     weather: Rect,
     timer1: Rect,
     timer2: Rect,
+    alert: Rect,
     volume: Rect,
     battery: Rect,
     brightness: Rect,
@@ -445,7 +483,7 @@ fn layout(w: u32, h: u32) -> Layout {
     // Top band: clock (left) + weather (right)
     let top_y: u32 = 8;
     let top_h: u32 = 78;
-    // Bottom section: notif icon row on top; timers keep the old 3-row grid on
+    // Bottom section: notif icon row on top; alarm toggle then timers in the old 3-row grid on
     // the right, while the 3 bars squeeze into the former 2-row span (r1..bottom)
     let sec_y: u32 = 95;
     let sec_h = h - sec_y;
@@ -469,13 +507,14 @@ fn layout(w: u32, h: u32) -> Layout {
         audio: Rect { x: lm, y: b2, w: BAR_ICON_W, h: bar_h },
         timer2: Rect { x: right - 120, y: r1, w: 120, h: row_h },
         timer1: Rect { x: right - 120, y: r2, w: 120, h: row_h },
+        alert: Rect { x: right - 32, y: r0, w: 32, h: row_h },
     }
 }
 
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Notif, Timer1, Timer2, Volume, Brightness, Audio, Date }
+enum HoverTile { None, Notif, Timer1, Timer2, Alert, Volume, Brightness, Audio, Date }
 
 
 // --- App ---
@@ -502,6 +541,8 @@ struct App {
     timer1_started: u64,
     timer2_duration: i64,
     timer2_started: u64,
+    alert: bool,
+    alert_sound: PathBuf,
     // Audio
     volume: f32,
     muted: bool,
@@ -517,6 +558,7 @@ struct App {
     timer1_config: i64,
     timer2_config: i64,
     volume_set_at: u64,
+    audio_refreshed: Instant,
     // Weather
     weather_temp: f64,
     weather_feels: f64,
@@ -551,6 +593,7 @@ impl App {
             weather_code: self.weather_code,
             weather_is_day: self.weather_is_day,
             weather_fetched: self.weather_fetched,
+            alert: self.alert,
         }
     }
 
@@ -559,6 +602,22 @@ impl App {
         self.volume = v;
         self.muted = m;
         self.headphones = is_headphones(&self.bt_device_1);
+    }
+
+    // Left click: start a stopped timer, pause a running one, or reset a finished one to its base
+    fn click_timer(&mut self, n: u8) {
+        let (dur, started, base) = if n == 1 { (&mut self.timer1_duration, &mut self.timer1_started, self.timer1_base) } else { (&mut self.timer2_duration, &mut self.timer2_started, self.timer2_base) };
+        if *started > 0 {
+            let rem = timer_remaining(*dur, *started);
+            *dur = if rem <= 0 { base } else { rem };
+            *started = 0;
+        } else {
+            *started = now_unix();
+        }
+        let started = *started;
+        save_state(&self.state());
+        if started > 0 { spawn_alarm(n, started); }
+        self.draw();
     }
 
     fn draw(&mut self) {
@@ -729,25 +788,32 @@ impl App {
             fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, fill_w.min(bar_w), BAR_H, BAR_RADIUS, vol_color, fill_alpha);
         }
 
+        // --- Alarm toggle (right column, above the timers) ---
+        let al_w = measure_text(&mut self.font_system, "\u{f34e}", UTIL_ICON_SIZE, fa, Weight::BLACK);
+        let al_alpha = if self.alert { 1.0 } else { 0.3 };
+        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+            "\u{f34e}", (lay.alert.x + lay.alert.w) as f32 - al_w, lay.alert.y as f32 + 6.0,
+            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.timer, hv == HoverTile::Alert), al_alpha),
+            fa, Weight::BLACK);
+
         // --- Timers (bottom-right, stacked: short on top, long on bottom) ---
         let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
         let t2_str = format_timer(t2_rem);
-        let t2_alpha = if self.timer2_started > 0 { 1.0 } else { 0.7 };
-        let t2_hovered = hv == HoverTile::Timer2;
+        let t = self.startup.elapsed().as_secs_f32();
+        let t2_color = timer_color(c, t, t2_rem, self.timer2_started, hv == HoverTile::Timer2);
         let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &t2_str, (lay.timer2.x + lay.timer2.w) as f32 - t2_w, lay.timer2.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, alpha_color(hover_color(c.timer, t2_hovered), t2_alpha),
+            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, t2_color,
             &self.font_family, Weight::BOLD);
 
         let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
         let t1_str = format_timer(t1_rem);
-        let t1_alpha = if self.timer1_started > 0 { 1.0 } else { 0.7 };
-        let t1_hovered = hv == HoverTile::Timer1;
+        let t1_color = timer_color(c, t, t1_rem, self.timer1_started, hv == HoverTile::Timer1);
         let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
         render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
             &t1_str, (lay.timer1.x + lay.timer1.w) as f32 - t1_w, lay.timer1.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, alpha_color(hover_color(c.timer, t1_hovered), t1_alpha),
+            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, t1_color,
             &self.font_family, Weight::BOLD);
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
@@ -774,28 +840,18 @@ impl App {
             return;
         }
 
-        if lay.timer1.contains(mx, my) {
-            if self.timer1_started > 0 {
-                let rem = timer_remaining(self.timer1_duration, self.timer1_started);
-                self.timer1_duration = rem;
-                self.timer1_started = 0;
-            } else {
-                self.timer1_started = now_unix();
-            }
-            save_state(&self.state());
-            self.draw();
-            return;
-        }
+        if lay.timer1.contains(mx, my) { self.click_timer(1); return; }
+        if lay.timer2.contains(mx, my) { self.click_timer(2); return; }
 
-        if lay.timer2.contains(mx, my) {
-            if self.timer2_started > 0 {
-                let rem = timer_remaining(self.timer2_duration, self.timer2_started);
-                self.timer2_duration = rem;
-                self.timer2_started = 0;
-            } else {
-                self.timer2_started = now_unix();
-            }
+        if lay.alert.contains(mx, my) {
+            self.alert = !self.alert;
             save_state(&self.state());
+            if self.alert {
+                // Preview the sound so output device and volume can be checked
+                Command::new("pw-play").arg(&self.alert_sound).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            } else {
+                Command::new("pkill").args(["-f", &format!("pw-play {}", self.alert_sound.display())]).status().unwrap();
+            }
             self.draw();
             return;
         }
@@ -860,6 +916,11 @@ impl App {
         let (mx, my) = (x as u32, y as u32);
         let lay = layout(self.width, self.height);
 
+        if lay.audio.contains(mx, my) {
+            Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            return;
+        }
+
         if lay.timer1.contains(mx, my) {
             self.timer1_duration = self.timer1_config;
             self.timer1_base = self.timer1_config;
@@ -906,6 +967,7 @@ impl App {
         if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
         if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
+        if lay.alert.contains(mx, my) { return HoverTile::Alert; }
         if lay.volume.contains(mx, my) { return HoverTile::Volume; }
         if lay.brightness.contains(mx, my) { return HoverTile::Brightness; }
         if lay.audio.contains(mx, my) { return HoverTile::Audio; }
@@ -947,6 +1009,15 @@ fn hover_color(c: [u8; 3], hovered: bool) -> [u8; 3] {
     if !hovered { return c; }
     let b = |v: f32| (v + (255.0 - v) * 0.25).min(255.0) as u8;
     [b(c[0] as f32), b(c[1] as f32), b(c[2] as f32)]
+}
+
+// `t` is seconds since launch; a finished timer breathes in the accent color until acknowledged
+fn timer_color(c: &Colors, t: f32, rem: i64, started: u64, hovered: bool) -> [u8; 3] {
+    if started > 0 && rem <= 0 {
+        let pulse = 0.5 + 0.5 * (t * std::f32::consts::PI).sin();
+        return alpha_color(hover_color(c.accentr, hovered), 0.5 + 0.5 * pulse);
+    }
+    alpha_color(hover_color(c.timer, hovered), if started > 0 { 1.0 } else { 0.7 })
 }
 
 fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
@@ -1190,6 +1261,12 @@ delegate_registry!(App);
 // --- Main ---
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--alarm") {
+        run_alarm(args[2].parse().unwrap(), args[3].parse().unwrap(), &load_config());
+        return;
+    }
+
     // Install SIGUSR2 handler immediately — must be before any setup so we
     // catch the release signal even if the key is released during startup.
     unsafe {
@@ -1203,7 +1280,11 @@ fn main() {
     let cfg = load_config();
     let colors = load_colors(cfg.color_file.as_deref());
     let st = load_state(&cfg);
-    let weather_fetch = if cfg.weather_lat != 0.0 && now_unix() - st.weather_fetched > WEATHER_MAX_AGE {
+    // Re-arm watchers for timers still running from a previous session (e.g. after a reboot)
+    for (n, started, dur) in [(1, st.timer1_started, st.timer1_duration), (2, st.timer2_started, st.timer2_duration)] {
+        if started > 0 && timer_remaining(dur, started) > 0 { spawn_alarm(n, started); }
+    }
+    let weather_fetch = if cfg.weather_lat != 0.0 && now_unix() - st.weather_fetched > cfg.weather_max_age {
         Command::new("curl")
             .args(["-s", "--max-time", "5", &format!(
                 "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,apparent_temperature,weather_code,is_day&temperature_unit=fahrenheit",
@@ -1280,6 +1361,8 @@ fn main() {
         timer1_started: st.timer1_started,
         timer2_duration: st.timer2_duration,
         timer2_started: st.timer2_started,
+        alert: st.alert,
+        alert_sound: expand_path(&cfg.alert_sound),
         volume,
         muted,
         headphones,
@@ -1291,6 +1374,7 @@ fn main() {
         timer1_config: cfg.timer1_duration as i64,
         timer2_config: cfg.timer2_duration as i64,
         volume_set_at: 0,
+        audio_refreshed: Instant::now(),
         weather_temp: st.weather_temp,
         weather_feels: st.weather_feels,
         weather_code: st.weather_code,
@@ -1306,7 +1390,7 @@ fn main() {
         startup: Instant::now(),
     };
 
-    // 1-second timer for clock/timer redraws
+    // Redraw tick (~30fps, so the finished-timer pulse is smooth); audio state is polled less often since it shells out
     let timer = Timer::from_duration(std::time::Duration::from_millis(TICK_MS));
     event_loop.handle().insert_source(timer, |_, _, app| {
         // Long press detection: after grace period, decide mode based on whether key was released
@@ -1317,8 +1401,9 @@ fn main() {
             app.exit = true;
             return TimeoutAction::Drop;
         }
-        if now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
+        if app.audio_refreshed.elapsed().as_millis() >= AUDIO_REFRESH_MS && now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.refresh_audio();
+            app.audio_refreshed = Instant::now();
         }
         if now_unix() - app.battery_read_at >= BATTERY_REFRESH {
             app.battery = read_battery();
