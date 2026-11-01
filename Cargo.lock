@@ -2389,6 +2389,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "libc",
+ "resvg",
  "serde",
  "smithay-client-toolkit",
  "tiny-skia 0.12.0",

@@ -31,7 +31,7 @@ use sctk::{
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, QueueHandle};
-use tiny_skia::Pixmap;
+use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 // --- Config ---
 
@@ -40,8 +40,7 @@ use tiny_skia::Pixmap;
 struct Config {
     color_file: Option<String>,
     font: String,
-    icon_font: String,
-    font_size: f32,
+    font_bold: String,
     timer1_duration: u64,
     timer2_duration: u64,
     bt_device_1: String,
@@ -57,9 +56,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             color_file: Some("~/.cache/wal/colors-wavedash.toml".into()),
-            font: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
-            icon_font: "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf".into(),
-            font_size: 39.0,
+            font: "~/.local/share/fonts/GoogleSansCode-Regular.ttf".into(),
+            font_bold: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             timer1_duration: 3600,
             timer2_duration: 900,
             bt_device_1: "AC:BF:71:08:A1:D6".into(),
@@ -105,25 +103,22 @@ fn expand_path(p: &str) -> PathBuf {
 
 // --- Colors ---
 
+#[derive(Clone, Copy)]
 struct Colors {
     background: [u8; 3],
     background_alpha: u8,
+    foreground: [u8; 3],
     border: [u8; 3],
     divider: [u8; 3],
-    sun: [u8; 3],
     clock: [u8; 3],
-    accentl: [u8; 3],
     accentr: [u8; 3],
     weather: [u8; 3],
-    audio: [u8; 3],
     volume: [u8; 3],
     brightness: [u8; 3],
     battery: [u8; 3],
     battery_charging: [u8; 3],
     battery_low: [u8; 3],
-    notif: [u8; 3],
     timer: [u8; 3],
-    dots: [[u8; 3]; 16],
 }
 
 impl Default for Colors {
@@ -131,28 +126,18 @@ impl Default for Colors {
         Self {
             background: [0x1e, 0x1e, 0x2e],
             background_alpha: 0xe6, // ~0.9
+            foreground: [0xcd, 0xd6, 0xf4],
             border: [0xcd, 0xd6, 0xf4],
             divider: [0xcd, 0xd6, 0xf4],
-            sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
-            accentl: [0x89, 0xb4, 0xfa],
             accentr: [0x89, 0xb4, 0xfa],
             weather: [0x94, 0xe2, 0xd5],
-            audio: [0xcb, 0xa6, 0xf7],
             volume: [0xcb, 0xa6, 0xf7],
             brightness: [0xcb, 0xa6, 0xf7],
             battery: [0xcb, 0xa6, 0xf7],
             battery_charging: [0xa6, 0xe3, 0xa1],
             battery_low: [0xf3, 0x8b, 0xa8],
-            notif: [0xcb, 0xa6, 0xf7],
             timer: [0xcb, 0xa6, 0xf7],
-            dots: [
-                [0xcd, 0xd6, 0xf4], // foreground
-                [0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa],
-                [0xcb, 0xa6, 0xf7], [0x94, 0xe2, 0xd5], [0xf2, 0xcd, 0xcd], [0xb4, 0xbe, 0xfe],
-                [0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa],
-                [0xcb, 0xa6, 0xf7], [0x94, 0xe2, 0xd5], [0xf2, 0xcd, 0xcd],
-            ],
         }
     }
 }
@@ -184,29 +169,19 @@ fn load_colors(path: Option<&str>) -> Colors {
                     if let Some(c) = parse_hex(val) {
                         match key {
                             "background" => colors.background = c,
+                            "foreground" => colors.foreground = c,
                             "border" => colors.border = c,
                             "divider" => colors.divider = c,
-                            "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
-                            "accentl" => colors.accentl = c,
                             "accentr" => colors.accentr = c,
                             "weather" => colors.weather = c,
-                            "audio" => colors.audio = c,
                             "volume" => colors.volume = c,
                             "brightness" => colors.brightness = c,
                             "battery" => colors.battery = c,
                             "battery_charging" => colors.battery_charging = c,
                             "battery_low" => colors.battery_low = c,
-                            "notif" => colors.notif = c,
                             "timer" => colors.timer = c,
-                            "foreground" => colors.dots[0] = c,
-                            _ => {
-                                if let Some(n) = key.strip_prefix("color") {
-                                    if let Ok(i) = n.parse::<usize>() {
-                                        if i >= 1 && i <= 15 { colors.dots[i] = c; }
-                                    }
-                                }
-                            }
+                            _ => {}
                         }
                     }
                 }
@@ -315,15 +290,15 @@ fn run_alarm(n: u8, started: u64, cfg: &Config) {
 }
 
 
-fn weather_icon(code: u32, is_day: bool) -> &'static str {
+// WMO weather code -> (index into WEATHER_ICONS, word)
+fn weather_kind(code: u32, is_day: bool) -> (usize, &'static str) {
     match code {
-        0 | 1 => if is_day { "\u{f185}" } else { "\u{f186}" }, // fa-sun / fa-moon
-        2 | 3 => "\u{f0c2}",           // fa-cloud
-        45 | 48 => "\u{f75f}",         // fa-smog
-        51..=67 | 80..=82 => "\u{f73d}", // fa-cloud-rain
-        71..=77 | 85 | 86 => "\u{f2dc}", // fa-snowflake
-        95 | 96 | 99 => "\u{f0e7}",    // fa-bolt
-        _ => "\u{f0c2}",
+        0 | 1 => (if is_day { 0 } else { 1 }, "clear"),
+        45 | 48 => (3, "fog"),
+        51..=67 | 80..=82 => (4, "rain"),
+        71..=77 | 85 | 86 => (5, "snow"),
+        95 | 96 | 99 => (6, "storm"),
+        _ => (2, "cloudy"),
     }
 }
 
@@ -346,9 +321,7 @@ fn get_volume() -> (f32, bool) {
 
 fn set_volume(vol: f32) {
     let v = vol.clamp(0.0, VOL_MAX);
-    Command::new("wpctl")
-        .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{v:.2}")])
-        .spawn().ok();
+    assert!(Command::new("wpctl").args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{v:.2}")]).status().unwrap().success(), "wpctl set-volume failed");
 }
 
 fn is_headphones(bt_mac: &str) -> bool {
@@ -411,9 +384,7 @@ fn read_brightness() -> Option<f32> {
 
 fn set_brightness(frac: f32) {
     let pct = (frac.clamp(0.0, 1.0) * 100.0).round() as u32;
-    Command::new("brightnessctl")
-        .args(["-q", "set", &format!("{pct}%")])
-        .spawn().ok();
+    assert!(Command::new("brightnessctl").args(["-q", "set", &format!("{pct}%")]).status().unwrap().success(), "brightnessctl set failed");
 }
 
 // --- Signal (long press detection) ---
@@ -425,24 +396,32 @@ extern "C" fn sigusr2_handler(_: libc::c_int) {
 }
 
 // --- Layout constants ---
+// Sizes are in design px; S scales the whole panel.
 
-const WIDTH: u32 = 440;
-const HEIGHT: u32 = 235;
-const ACCENT_W: u32 = 4;
-const LEFT_MARGIN: f32 = ACCENT_W as f32 + 10.0;
-
-// Type scale
-const CLOCK_HM_SIZE: f32 = 52.0;
-const DATE_SIZE: f32 = 14.0;
-const WEATHER_ICON_SIZE: f32 = 23.0;
-const WEATHER_TEMP_SIZE: f32 = 36.0;
-const WEATHER_FEELS_SIZE: f32 = 18.0;
-const TIMER_SIZE: f32 = 32.0;
-const UTIL_ICON_SIZE: f32 = 21.0;
-const BAR_ICON_SIZE: f32 = 17.0;
+const S: f32 = 1.0;
+const WIDTH: f32 = 440.0 * S;
+const PAD: f32 = 6.0 * S;          // panel edge to frame
+const LINE: f32 = 1.0 * S;         // frame and divider thickness
+const INSET_X: f32 = 10.0 * S;     // frame to content
+const INSET_Y: f32 = 8.0 * S;
+const ROW_H: f32 = 22.0 * S;
+const DIV_H: f32 = 17.0 * S;       // divider row: space, rule, space
+const LABEL_W: f32 = 48.0 * S;     // icon + label column of level and timer rows
+const VALUE_W: f32 = 92.0 * S;     // value + state word column
+const GAP: f32 = 10.0 * S;
+const ICON: f32 = 14.0 * S;
+const ICON_GAP: f32 = 7.0 * S;     // icon to its label
+const TOGGLE_GAP: f32 = 18.0 * S;
+const BAR_T: f32 = 8.0 * S;        // bar thickness
+const TEXT: f32 = 12.0 * S;
+const CLOCK: f32 = 14.0 * S;
 const LINE_HEIGHT: f32 = 1.2;
 
-// Hover
+// Opacities, blended against the background
+const DIM: f32 = 0.6;     // labels and secondary text
+const OFF: f32 = 0.32;    // off toggles, muted volume
+const TRACK: f32 = 0.14;  // empty part of a bar
+const RULE: f32 = 0.18;   // frame and dividers
 
 // Volume
 const VOL_SCROLL_STEP: f32 = 0.05;
@@ -456,11 +435,6 @@ const BATTERY_LOW: f32 = 0.20;
 const BRIGHTNESS_SCROLL_STEP: f32 = 0.05;
 const BRIGHTNESS_MIN: f32 = 0.05;
 
-// Bar rows (brightness/battery/volume)
-const BAR_H: u32 = 7;
-const BAR_RADIUS: u32 = 2;
-const BAR_ICON_W: u32 = 25; // icon cell width left of each bar
-
 // Timers
 const TIMER_SCROLL_STEP: i64 = 60;
 
@@ -470,77 +444,48 @@ const AUDIO_REFRESH_MS: u128 = 500;
 const AUDIO_REFRESH_COOLDOWN: u64 = 1;
 const LONG_PRESS_GRACE_MS: u64 = 300;
 
-// --- Tile geometry ---
+// Header, level rows, two timers and the toggle row, with a divider between each group
+fn panel_height(levels: u32) -> u32 {
+    (2.0 * (PAD + LINE + INSET_Y) + ROW_H * (4 + levels) as f32 + 3.0 * DIV_H).round() as u32
+}
 
-#[derive(Clone, Copy)]
-struct Rect { x: u32, y: u32, w: u32, h: u32 }
+// --- Geometry ---
+
+#[derive(Clone, Copy, Default)]
+struct Rect { x: f32, y: f32, w: f32, h: f32 }
 
 impl Rect {
-    fn contains(&self, mx: u32, my: u32) -> bool {
-        mx >= self.x && mx < self.x + self.w && my >= self.y && my < self.y + self.h
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+    // The bar of a level or timer row, between the label and value columns
+    fn bar(&self) -> Rect {
+        Rect { x: self.x + LABEL_W + GAP, w: self.w - LABEL_W - VALUE_W - 2.0 * GAP, ..*self }
     }
 }
 
+// Rows and buttons; anything a machine lacks is a zero-size Rect
 struct Layout {
-    toggle: Rect,
-    clock: Rect,
+    dividers: [f32; 3],
+    time: Rect,
     date: Rect,
-    notif: Rect,
     weather: Rect,
+    volume: Rect,
+    brightness: Rect,
+    battery: Rect,
     timer1: Rect,
     timer2: Rect,
-    alert: Rect,
-    volume: Rect,
-    battery: Rect,
-    brightness: Rect,
-    audio: Rect,
+    notif: Rect,
+    alarm: Rect,
+    output: Rect,
+    dim: Rect,
 }
-
-// `brightness` / `battery` say which bars this machine has (sysfs backlight / power supply).
-fn layout(w: u32, h: u32, brightness: bool, battery: bool) -> Layout {
-    let lm = LEFT_MARGIN as u32;
-    let right = w - lm;
-    // Top band: clock (left) + weather (right)
-    let top_y: u32 = 8;
-    let top_h: u32 = 78;
-    // Bottom section: the right side is a 3-row grid (alarm toggle, then the timers). On the left,
-    // icon rows (dim toggle when there is no backlight, notif) take one grid row each and the bar
-    // rows (brightness, battery, volume) split whatever is left.
-    let sec_y: u32 = 95;
-    let sec_h = h - sec_y;
-    let row_h = sec_h / 3;
-    let r0 = sec_y;
-    let r1 = sec_y + row_h;
-    let r2 = sec_y + row_h * 2;
-    let toggle_h = if brightness { 0 } else { row_h };
-    let notif_y = sec_y + toggle_h;
-    let bars_y = notif_y + row_h;
-    let bars = 1 + brightness as u32 + battery as u32;
-    let bar_h = (h - bars_y) / bars;
-    let bar = |i: u32| Rect { x: lm + BAR_ICON_W, y: bars_y + bar_h * i, w: 200, h: bar_h };
-    let none = Rect { x: 0, y: 0, w: 0, h: 0 };
-    let date_y = top_y + (CLOCK_HM_SIZE * LINE_HEIGHT + 6.0) as u32;
-    Layout {
-        clock: Rect { x: lm, y: top_y, w: 240, h: top_h },
-        date: Rect { x: lm, y: date_y, w: 150, h: (DATE_SIZE * LINE_HEIGHT + 4.0) as u32 },
-        weather: Rect { x: right - 160, y: top_y, w: 160, h: top_h },
-        toggle: Rect { x: lm, y: sec_y, w: 32, h: toggle_h },
-        notif: Rect { x: lm, y: notif_y, w: 32, h: row_h },
-        brightness: if brightness { bar(0) } else { none },
-        battery: if battery { bar(brightness as u32) } else { none },
-        volume: bar(bars - 1),
-        audio: Rect { x: lm, y: bars_y + bar_h * (bars - 1), w: BAR_ICON_W, h: bar_h },
-        timer2: Rect { x: right - 120, y: r1, w: 120, h: row_h },
-        timer1: Rect { x: right - 120, y: r2, w: 120, h: row_h },
-        alert: Rect { x: right - 32, y: r0, w: 32, h: row_h },
-    }
-}
-
-// --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Alert, Volume, Brightness, Audio, Date }
+enum Hover { None, Date, Volume, Brightness, Timer1, Timer2, Notif, Alarm, Output, Dim }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Drag { Volume, Brightness, Timer1, Timer2 }
 
 // --- App ---
 
@@ -560,7 +505,10 @@ struct App {
     swash_cache: SwashCache,
     colors: Colors,
     font_family: String,
-    icon_family: String,
+    icons: Icons,
+    // Advance of one character (the font is monospace): body text and clock
+    cw: f32,
+    clock_cw: f32,
     // Timer state
     timer1_duration: i64,
     timer1_started: u64,
@@ -577,12 +525,15 @@ struct App {
     audio_device_2: String,
     // Dim toggle (hyprsunset via dim_toggle.sh); only shown when there is no backlight
     is_dim: bool,
-    // Hover
-    hover: HoverTile,
+    hover: Hover,
+    drag: Option<Drag>,
+    // Scroll and drag only update these; the tick applies them, at most once per frame
+    volume_dirty: bool,
+    brightness_dirty: bool,
     // Base durations for reset (scroll-adjusted)
     timer1_base: i64,
     timer2_base: i64,
-    // Config-defined durations (middle-click reset target)
+    // Config-defined durations (middle-click reset target, and the scale of the timer bars)
     timer1_config: i64,
     timer2_config: i64,
     volume_set_at: u64,
@@ -645,213 +596,165 @@ impl App {
         let started = *started;
         save_state(&self.state());
         if started > 0 { spawn_alarm(n, started); }
-        self.draw();
+    }
+
+    // Stop a timer at its base (right click) or at the config duration, which also becomes the base (middle click)
+    fn reset_timer(&mut self, n: u8, to_config: bool) {
+        let (dur, started, base, config) = if n == 1 { (&mut self.timer1_duration, &mut self.timer1_started, &mut self.timer1_base, self.timer1_config) } else { (&mut self.timer2_duration, &mut self.timer2_started, &mut self.timer2_base, self.timer2_config) };
+        if to_config { *base = config; }
+        *dur = *base;
+        *started = 0;
+        save_state(&self.state());
+    }
+
+    fn output_label(&self) -> &'static str {
+        if self.headphones { "headphones" } else { "speakers" }
+    }
+
+    // ("54° clear", "feels 51°"), or None before the first fetch
+    fn weather_text(&self) -> Option<(String, String)> {
+        if self.weather_fetched == 0 { return None; }
+        let word = weather_kind(self.weather_code, self.weather_is_day).1;
+        Some((format!("{:.0}° {word}", self.weather_temp), format!("feels {:.0}°", self.weather_feels)))
+    }
+
+    fn layout(&self) -> Layout {
+        let x = PAD + LINE + INSET_X;
+        let w = self.width as f32 - 2.0 * x;
+        let row = |y: f32| Rect { x, y, w, h: ROW_H };
+        let text_w = |s: &str| s.chars().count() as f32 * self.cw;
+        let rule = |y: f32| y + (DIV_H - LINE) / 2.0;
+
+        // Header: time, date and weather spread evenly across the row
+        let mut y = PAD + LINE + INSET_Y;
+        let time_w = clock_text().chars().count() as f32 * self.clock_cw;
+        let date_w = ICON + ICON_GAP + text_w(&format_date());
+        let weather_w = self.weather_text().map_or(0.0, |(a, b)| ICON + ICON_GAP + text_w(&a) + GAP + text_w(&b));
+        let gap = (w - time_w - date_w - weather_w) / if weather_w > 0.0 { 2.0 } else { 1.0 };
+        let time = Rect { x, y, w: time_w, h: ROW_H };
+        let date = Rect { x: x + time_w + gap, y, w: date_w, h: ROW_H };
+        let weather = Rect { x: x + w - weather_w, y, w: weather_w, h: ROW_H };
+        y += ROW_H;
+        let d0 = rule(y);
+        y += DIV_H;
+
+        let volume = row(y);
+        y += ROW_H;
+        let brightness = if self.brightness.is_some() { y += ROW_H; row(y - ROW_H) } else { Rect::default() };
+        let battery = if self.battery.is_some() { y += ROW_H; row(y - ROW_H) } else { Rect::default() };
+        let d1 = rule(y);
+        y += DIV_H;
+
+        let timer1 = row(y);
+        let timer2 = row(y + ROW_H);
+        y += 2.0 * ROW_H;
+        let d2 = rule(y);
+        y += DIV_H;
+
+        // Toggles, left to right
+        let mut tx = x;
+        let mut toggle = |label: &str| {
+            let r = Rect { x: tx, y, w: ICON + ICON_GAP + text_w(label), h: ROW_H };
+            tx += r.w + TOGGLE_GAP;
+            r
+        };
+        let notif = toggle("notif");
+        let alarm = toggle("alarm");
+        let output = toggle(self.output_label());
+        let dim = if self.brightness.is_none() { toggle("dim") } else { Rect::default() };
+
+        Layout { dividers: [d0, d1, d2], time, date, weather, volume, brightness, battery, timer1, timer2, notif, alarm, output, dim }
+    }
+
+    fn hover_at(&self, x: f32, y: f32) -> Hover {
+        let l = self.layout();
+        [(l.date, Hover::Date), (l.volume, Hover::Volume), (l.brightness, Hover::Brightness), (l.timer1, Hover::Timer1),
+         (l.timer2, Hover::Timer2), (l.notif, Hover::Notif), (l.alarm, Hover::Alarm), (l.output, Hover::Output), (l.dim, Hover::Dim)]
+            .into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hover::None, |(_, h)| h)
     }
 
     fn draw(&mut self) {
-        let c = &self.colors;
-        let bg = c.background;
-        let bg_a = c.background_alpha;
         let lay = self.layout();
+        let c = self.colors;
         let hv = self.hover;
+        let (w, h) = (self.width, self.height);
+        let clock = clock_text();
+        let date = format_date();
+        let weather = self.weather_text();
+        let pulse_t = self.startup.elapsed().as_secs_f32();
+        let output = self.output_label();
 
-        let stride = self.width as i32 * 4;
         let (wl_buf, canvas) = self.pool
-            .create_buffer(self.width as i32, self.height as i32, stride, wl_shm::Format::Argb8888)
+            .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
             .unwrap();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        fill_rect_alpha(pixmap.data_mut(), w, h, 0, 0, w, h, c.background, c.background_alpha);
 
-        let mut pixmap = Pixmap::new(self.width, self.height).unwrap();
-        pixmap.fill(tiny_skia::Color::TRANSPARENT);
+        let fg = c.foreground;
+        let (dim, off) = (fade(fg, c.background, DIM), fade(fg, c.background, OFF));
+        let label = |which: Hover| if hv == which { fg } else { dim };
+        let ic = &self.icons;
+        let mut p = Painter {
+            pm: &mut pixmap, fs: &mut self.font_system, sc: &mut self.swash_cache, family: &self.font_family, cw: self.cw,
+            fg, dim, off, track: fade(fg, c.background, TRACK),
+        };
 
-        let pw = pixmap.width();
-        let ph = pixmap.height();
+        // Frame and dividers
+        let (fw, fh) = (w as f32 - 2.0 * PAD, h as f32 - 2.0 * PAD);
+        let border = fade(c.border, c.background, RULE);
+        p.fill(PAD, PAD, fw, LINE, border);
+        p.fill(PAD, PAD + fh - LINE, fw, LINE, border);
+        p.fill(PAD, PAD, LINE, fh, border);
+        p.fill(PAD + fw - LINE, PAD, LINE, fh, border);
+        for y in lay.dividers { p.fill(PAD + LINE, y, fw - 2.0 * LINE, LINE, fade(c.divider, c.background, RULE)); }
 
-        // Full-bleed background
-        fill_rect_alpha(pixmap.data_mut(), pw, ph, 0, 0, self.width, self.height, bg, bg_a);
-
-        // Accent bars (left + right edge, full height)
-        fill_rect(pixmap.data_mut(), pw, ph, 0, 0, ACCENT_W, self.height, c.accentl);
-        fill_rect(pixmap.data_mut(), pw, ph, self.width - ACCENT_W, 0, ACCENT_W, self.height, c.accentr);
-
-        let fa = &self.icon_family;
-
-        // --- Clock (top-left, hero) ---
-        let now = chrono_now();
-        let h12 = if now.0 == 0 { 12 } else if now.0 > 12 { now.0 - 12 } else { now.0 };
-        let ampm = if now.0 < 12 { "AM" } else { "PM" };
-        let hm_str = format!("{}:{:02}", h12, now.1);
-        let clock_y = lay.clock.y as f32 + 4.0;
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &hm_str, LEFT_MARGIN, clock_y,
-            CLOCK_HM_SIZE, lay.clock.w as f32, lay.clock.h as f32, c.clock,
-            &self.font_family, Weight::BOLD);
-        let ampm_size = CLOCK_HM_SIZE * 0.45;
-        let hm_w = measure_text(&mut self.font_system, &hm_str, CLOCK_HM_SIZE, &self.font_family, Weight::BOLD);
-        let ampm_x = LEFT_MARGIN + hm_w + 4.0;
-        let ampm_y = clock_y + CLOCK_HM_SIZE - ampm_size - 2.0;
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            ampm, ampm_x, ampm_y,
-            ampm_size, 50.0, 30.0, c.clock,
-            &self.font_family, Weight::BOLD);
-
-        // Date below clock (clickable — opens Google Calendar)
-        let date_str = format_date();
-        let date_y = clock_y + CLOCK_HM_SIZE * LINE_HEIGHT + 2.0;
-
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &date_str, LEFT_MARGIN, date_y,
-            DATE_SIZE, lay.clock.w as f32, 30.0, hover_color(c.clock, hv == HoverTile::Date),
-            &self.font_family, Weight::BOLD);
-
-        // --- Weather (top-right) ---
-        if self.weather_fetched > 0 {
-            let icon = weather_icon(self.weather_code, self.weather_is_day);
-            let temp_str = format!("{:.0}°", self.weather_temp);
-            let feels_str = format!("{:.0}°", self.weather_feels);
-            let icon_w = measure_text(&mut self.font_system, icon, WEATHER_ICON_SIZE, fa, Weight::NORMAL);
-            let temp_w = measure_text(&mut self.font_system, &temp_str, WEATHER_TEMP_SIZE, &self.font_family, Weight::BOLD);
-            let gap = 6.0;
-            let block_w = icon_w + gap + temp_w;
-            let weather_right = (lay.weather.x + lay.weather.w) as f32;
-            let weather_x = weather_right - block_w;
-            let weather_y = lay.weather.y as f32 + 4.0;
-            let icon_y = weather_y + (WEATHER_TEMP_SIZE - WEATHER_ICON_SIZE) * 0.5;
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                icon, weather_x, icon_y,
-                WEATHER_ICON_SIZE, 50.0, 50.0, c.weather,
-                fa, Weight::NORMAL);
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                &temp_str, weather_x + icon_w + gap, weather_y,
-                WEATHER_TEMP_SIZE, 100.0, 50.0, c.weather,
-                &self.font_family, Weight::BOLD);
-            // Feels-like below, right-aligned
-            let feels_w = measure_text(&mut self.font_system, &feels_str, WEATHER_FEELS_SIZE, &self.font_family, Weight::BOLD);
-            let feels_x = weather_right - feels_w;
-            let feels_y = weather_y + WEATHER_TEMP_SIZE * LINE_HEIGHT + 2.0;
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                &feels_str, feels_x, feels_y,
-                WEATHER_FEELS_SIZE, 100.0, 30.0, alpha_color(c.weather, 0.5),
-                &self.font_family, Weight::BOLD);
+        // Header
+        p.text(&clock, lay.time.x, lay.time.y, CLOCK, Weight::BOLD, c.clock);
+        let date_c = label(Hover::Date);
+        p.icon(&ic.cal, lay.date.x, lay.date.y, date_c);
+        p.text(&date, lay.date.x + ICON + ICON_GAP, lay.date.y, TEXT, Weight::NORMAL, date_c);
+        if let Some((now, feels)) = &weather {
+            let x = lay.weather.x + ICON + ICON_GAP;
+            p.icon(&ic.weather[weather_kind(self.weather_code, self.weather_is_day).0], lay.weather.x, lay.weather.y, c.weather);
+            p.text(now, x, lay.weather.y, TEXT, Weight::NORMAL, c.weather);
+            p.text(feels, x + now.chars().count() as f32 * self.cw + GAP, lay.weather.y, TEXT, Weight::NORMAL, dim);
         }
 
-        // --- Dim toggle (sun/moon per weather is_day; only when there is no brightness bar) ---
-        if lay.toggle.h > 0 {
-            let icon = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                icon, lay.toggle.x as f32 + 3.0, lay.toggle.y as f32 + 6.0,
-                UTIL_ICON_SIZE, 30.0, 30.0, hover_color(c.sun, hv == HoverTile::Toggle),
-                fa, Weight::BLACK);
+        // Levels
+        let vol = format!("{:.0}%", self.volume * 100.0);
+        if self.muted {
+            p.row(&lay.volume, &ic.vol_off, "vol", off, self.volume / VOL_MAX, fade(c.volume, c.background, OFF), &vol, off, "muted");
+        } else {
+            p.row(&lay.volume, &ic.vol, "vol", label(Hover::Volume), self.volume / VOL_MAX, c.volume, &vol, hover_color(fg, hv == Hover::Volume), "");
         }
-
-        // --- Notif icon (left, above the bars) ---
-        let notif_icon = if self.notif_paused { "\u{f1f6}" } else { "\u{f0f3}" };
-        let notif_color = hover_color(c.notif, hv == HoverTile::Notif);
-        let notif_w_on = measure_text(&mut self.font_system, "\u{f0f3}", UTIL_ICON_SIZE, fa, Weight::BLACK);
-        let notif_w_off = measure_text(&mut self.font_system, "\u{f1f6}", UTIL_ICON_SIZE, fa, Weight::BLACK);
-        let notif_w_cur = if self.notif_paused { notif_w_off } else { notif_w_on };
-        let notif_x = lay.notif.x as f32 + 2.0 + (notif_w_on.max(notif_w_off) - notif_w_cur) / 2.0;
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            notif_icon, notif_x, lay.notif.y as f32 + 6.0,
-            UTIL_ICON_SIZE, 30.0, 30.0, notif_color,
-            fa, Weight::BLACK);
-
-        // --- Bar rows (brightness / battery / volume): icon in the 32px left
-        // cell, pill bar beside it, both centered in the row ---
-        let bar_icon_y = |r: &Rect| r.y as f32 + (r.h as f32 - BAR_ICON_SIZE * LINE_HEIGHT) / 2.0;
-        let bar_y_for = |r: &Rect| r.y + (r.h - BAR_H) / 2;
-        let bar_icon_x = |r: &Rect, icon_w: f32|
-            (r.x - BAR_ICON_W) as f32 + (BAR_ICON_W as f32 - icon_w) / 2.0 - 2.0;
-
-        // Brightness (top, hidden when no backlight)
-        if let Some(frac) = self.brightness {
-            let br_color = hover_color(c.brightness, hv == HoverTile::Brightness);
-            let br_icon = "\u{f185}";
-            let bi_w = measure_text(&mut self.font_system, br_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                br_icon, bar_icon_x(&lay.brightness, bi_w), bar_icon_y(&lay.brightness),
-                BAR_ICON_SIZE, 30.0, 30.0, br_color,
-                fa, Weight::BLACK);
-
-            let bar_y = bar_y_for(&lay.brightness);
-            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.brightness.x, bar_y, lay.brightness.w, BAR_H, BAR_RADIUS, br_color, 50);
-            let fill_w = (frac * lay.brightness.w as f32).round() as u32;
-            if fill_w > 0 {
-                fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.brightness.x, bar_y, fill_w.min(lay.brightness.w), BAR_H, BAR_RADIUS, br_color, 255);
-            }
+        if let Some(b) = self.brightness {
+            p.row(&lay.brightness, &ic.bri, "bri", label(Hover::Brightness), b, c.brightness, &format!("{:.0}%", b * 100.0), hover_color(fg, hv == Hover::Brightness), "");
         }
-
-        // Battery (middle, hidden when no battery)
         if let Some((pct, plugged)) = self.battery {
-            let bat_color = if plugged { c.battery_charging }
-                else if pct <= BATTERY_LOW { c.battery_low }
-                else { c.battery };
-            let bat_icon = "\u{f244}";
-            let bi_w = measure_text(&mut self.font_system, bat_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
-            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-                bat_icon, bar_icon_x(&lay.battery, bi_w), bar_icon_y(&lay.battery),
-                BAR_ICON_SIZE, 30.0, 30.0, bat_color,
-                fa, Weight::BLACK);
-
-            let bar_y = bar_y_for(&lay.battery);
-            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.battery.x, bar_y, lay.battery.w, BAR_H, BAR_RADIUS, bat_color, 50);
-            let fill_w = (pct * lay.battery.w as f32).round() as u32;
-            if fill_w > 0 {
-                fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, lay.battery.x, bar_y, fill_w.min(lay.battery.w), BAR_H, BAR_RADIUS, bat_color, 255);
-            }
+            let low = !plugged && pct <= BATTERY_LOW;
+            let bar_c = if plugged { c.battery_charging } else if low { c.battery_low } else { c.battery };
+            p.row(&lay.battery, &ic.bat, "bat", dim, pct, bar_c, &format!("{:.0}%", pct * 100.0), fg, if plugged { "charging" } else if low { "low" } else { "" });
+            p.icon(&battery_fill(ic.n, pct, plugged.then_some(&ic.bolt[..])), lay.battery.x, lay.battery.y, bar_c);
         }
 
-        // Audio icon (bottom)
-        let audio_icon = if self.headphones { "\u{f025}" } else { "\u{f028}" };
-        let ai_alpha = if self.muted { 0.3 } else { 1.0 };
-        let ai_hovered = hv == HoverTile::Audio;
-        let ai_w = measure_text(&mut self.font_system, audio_icon, BAR_ICON_SIZE, fa, Weight::BLACK);
-        let ai_x = lay.audio.x as f32 + (lay.audio.w as f32 - ai_w) / 2.0 - 2.0;
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            audio_icon, ai_x, bar_icon_y(&lay.audio),
-            BAR_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.audio, ai_hovered), ai_alpha),
-            fa, Weight::BLACK);
-
-        // --- Volume bar (same row as audio, rounded fill bar) ---
-        let vol_hovered = hv == HoverTile::Volume;
-        let vol_color = hover_color(c.volume, vol_hovered);
-        let bar_w = lay.volume.w;
-        let bar_x = lay.volume.x;
-        let bar_y = bar_y_for(&lay.volume);
-        let track_alpha: u8 = if self.muted { 25 } else { 50 };
-        let fill_alpha: u8 = if self.muted { 77 } else { 255 };
-        fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, bar_w, BAR_H, BAR_RADIUS, vol_color, track_alpha);
-        let fill_w = ((self.volume / VOL_MAX) * bar_w as f32).round() as u32;
-        if fill_w > 0 {
-            fill_rounded_rect_alpha(pixmap.data_mut(), pw, ph, bar_x, bar_y, fill_w.min(bar_w), BAR_H, BAR_RADIUS, vol_color, fill_alpha);
+        // Timers: the bar is the remaining time on the scale of the config duration
+        for (r, dur, started, config, which, name) in [
+            (lay.timer1, self.timer1_duration, self.timer1_started, self.timer1_config, Hover::Timer1, "t1"),
+            (lay.timer2, self.timer2_duration, self.timer2_started, self.timer2_config, Hover::Timer2, "t2"),
+        ] {
+            let rem = timer_remaining(dur, started);
+            let state = if started == 0 { "paused" } else if rem <= 0 { "done" } else { "" };
+            let value_c = timer_color(&c, pulse_t, rem, started, hv == which);
+            p.row(&r, &ic.timer, name, label(which), rem as f32 / config as f32, c.timer, &format_timer(rem), value_c, state);
         }
 
-        // --- Alarm toggle (right column, above the timers) ---
-        let al_w = measure_text(&mut self.font_system, "\u{f34e}", UTIL_ICON_SIZE, fa, Weight::BLACK);
-        let al_alpha = if self.alert { 1.0 } else { 0.3 };
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            "\u{f34e}", (lay.alert.x + lay.alert.w) as f32 - al_w, lay.alert.y as f32 + 6.0,
-            UTIL_ICON_SIZE, 30.0, 30.0, alpha_color(hover_color(c.timer, hv == HoverTile::Alert), al_alpha),
-            fa, Weight::BLACK);
-
-        // --- Timers (bottom-right, stacked: short on top, long on bottom) ---
-        let t2_rem = timer_remaining(self.timer2_duration, self.timer2_started);
-        let t2_str = format_timer(t2_rem);
-        let t = self.startup.elapsed().as_secs_f32();
-        let t2_color = timer_color(c, t, t2_rem, self.timer2_started, hv == HoverTile::Timer2);
-        let t2_w = measure_text(&mut self.font_system, &t2_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &t2_str, (lay.timer2.x + lay.timer2.w) as f32 - t2_w, lay.timer2.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer2.w as f32, lay.timer2.h as f32, t2_color,
-            &self.font_family, Weight::BOLD);
-
-        let t1_rem = timer_remaining(self.timer1_duration, self.timer1_started);
-        let t1_str = format_timer(t1_rem);
-        let t1_color = timer_color(c, t, t1_rem, self.timer1_started, hv == HoverTile::Timer1);
-        let t1_w = measure_text(&mut self.font_system, &t1_str, TIMER_SIZE, &self.font_family, Weight::BOLD);
-        render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
-            &t1_str, (lay.timer1.x + lay.timer1.w) as f32 - t1_w, lay.timer1.y as f32 + 6.0,
-            TIMER_SIZE, lay.timer1.w as f32, lay.timer1.h as f32, t1_color,
-            &self.font_family, Weight::BOLD);
+        // Toggles
+        p.toggle(&lay.notif, if self.notif_paused { &ic.bell_off } else { &ic.bell }, "notif", !self.notif_paused, hv == Hover::Notif);
+        p.toggle(&lay.alarm, if self.alert { &ic.alarm } else { &ic.alarm_off }, "alarm", self.alert, hv == Hover::Alarm);
+        p.toggle(&lay.output, if self.headphones { &ic.phones } else { &ic.speaker }, output, true, hv == Hover::Output);
+        if self.brightness.is_none() {
+            p.toggle(&lay.dim, if self.weather_is_day { &ic.bri } else { &ic.moon }, "dim", true, hv == Hover::Dim);
+        }
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
         for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
@@ -862,173 +765,142 @@ impl App {
         }
 
         wl_buf.attach_to(self.layer.wl_surface()).unwrap();
-        self.layer.wl_surface().damage_buffer(0, 0, self.width as i32, self.height as i32);
+        self.layer.wl_surface().damage_buffer(0, 0, w as i32, h as i32);
         self.layer.wl_surface().commit();
     }
 
-    fn layout(&self) -> Layout {
-        layout(self.width, self.height, self.brightness.is_some(), self.battery.is_some())
-    }
-
-    fn handle_click(&mut self, x: f64, y: f64) {
-        let (mx, my) = (x as u32, y as u32);
+    fn handle_click(&mut self, x: f32, y: f32) {
         let lay = self.layout();
-
-        if lay.toggle.contains(mx, my) {
-            let arg = if self.is_dim { "1" } else { "0" };
-            Command::new("sh").arg("-c").arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}", home().display())).spawn().ok();
-            self.is_dim = !self.is_dim;
-            self.draw();
+        let target = self.hover_at(x, y);
+        // A press on a bar starts a drag; the rest of the row is a button
+        self.drag = match target {
+            Hover::Volume if lay.volume.bar().contains(x, y) => Some(Drag::Volume),
+            Hover::Brightness if lay.brightness.bar().contains(x, y) => Some(Drag::Brightness),
+            Hover::Timer1 if lay.timer1.bar().contains(x, y) => Some(Drag::Timer1),
+            Hover::Timer2 if lay.timer2.bar().contains(x, y) => Some(Drag::Timer2),
+            _ => None,
+        };
+        if self.drag.is_some() {
+            self.drag_to(x);
             return;
         }
-
-        if lay.notif.contains(mx, my) {
-            Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
-            self.notif_paused = !self.notif_paused;
-            self.draw();
-            return;
-        }
-
-        if lay.timer1.contains(mx, my) { self.click_timer(1); return; }
-        if lay.timer2.contains(mx, my) { self.click_timer(2); return; }
-
-        if lay.alert.contains(mx, my) {
-            self.alert = !self.alert;
-            save_state(&self.state());
-            if self.alert {
-                // Preview the sound so output device and volume can be checked
-                play_alert(&self.alert_sound, self.alert_volume);
-            } else {
-                Command::new("pkill").args(["-f", &format!("pw-play .*{}", self.alert_sound.display())]).status().unwrap();
+        match target {
+            Hover::Volume => {
+                toggle_mute();
+                self.refresh_audio();
             }
-            self.draw();
-            return;
-        }
-
-        if lay.date.contains(mx, my) {
-            Command::new("xdg-open").arg("https://calendar.google.com").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-            return;
-        }
-
-        if lay.audio.contains(mx, my) {
-            toggle_mute();
-            self.refresh_audio();
-            self.draw();
-        }
-    }
-
-    fn handle_scroll(&mut self, x: f64, y: f64, dy: f64) {
-        let (mx, my) = (x as u32, y as u32);
-        let lay = self.layout();
-
-        if lay.volume.contains(mx, my) {
-            let delta: f32 = if dy > 0.0 { -VOL_SCROLL_STEP } else { VOL_SCROLL_STEP };
-            self.volume = (self.volume + delta).clamp(0.0, VOL_MAX);
-            set_volume(self.volume);
-            self.draw();
-            return;
-        }
-
-        if lay.brightness.contains(mx, my) {
-            if let Some(frac) = self.brightness {
-                let delta: f32 = if dy > 0.0 { -BRIGHTNESS_SCROLL_STEP } else { BRIGHTNESS_SCROLL_STEP };
-                let frac = (frac + delta).clamp(BRIGHTNESS_MIN, 1.0);
-                self.brightness = Some(frac);
-                set_brightness(frac);
-                self.brightness_set_at = now_unix();
-                self.draw();
+            Hover::Timer1 => self.click_timer(1),
+            Hover::Timer2 => self.click_timer(2),
+            Hover::Date => {
+                Command::new("xdg-open").arg("https://calendar.google.com").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
             }
-            return;
+            Hover::Notif => {
+                Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
+                self.notif_paused = !self.notif_paused;
+            }
+            Hover::Alarm => {
+                self.alert = !self.alert;
+                save_state(&self.state());
+                if self.alert {
+                    // Preview the sound so output device and volume can be checked
+                    play_alert(&self.alert_sound, self.alert_volume);
+                } else {
+                    Command::new("pkill").args(["-f", &format!("pw-play .*{}", self.alert_sound.display())]).status().unwrap();
+                }
+            }
+            Hover::Output => {
+                self.refresh_audio();
+                let target = if self.headphones { &self.audio_device_2 } else { &self.bt_device_1 };
+                switch_audio(target);
+                self.refresh_audio();
+            }
+            Hover::Dim => {
+                let arg = if self.is_dim { "1" } else { "0" };
+                Command::new("sh").arg("-c").arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}", home().display())).spawn().ok();
+                self.is_dim = !self.is_dim;
+            }
+            Hover::Brightness | Hover::None => {}
         }
-
-        if lay.timer1.contains(mx, my) {
-            let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
-            self.timer1_duration = (self.timer1_duration + delta).max(TIMER_SCROLL_STEP);
-            self.timer1_base = self.timer1_duration;
-            save_state(&self.state());
-            self.draw();
-            return;
-        }
-
-        if lay.timer2.contains(mx, my) {
-            let delta: i64 = if dy > 0.0 { -TIMER_SCROLL_STEP } else { TIMER_SCROLL_STEP };
-            self.timer2_duration = (self.timer2_duration + delta).max(TIMER_SCROLL_STEP);
-            self.timer2_base = self.timer2_duration;
-            save_state(&self.state());
-            self.draw();
-        }
+        self.draw();
     }
 
-    fn handle_middle_click(&mut self, x: f64, y: f64) {
-        let (mx, my) = (x as u32, y as u32);
+    // Set the dragged value from the pointer's x; timers snap to whole minutes
+    fn drag_to(&mut self, x: f32) {
         let lay = self.layout();
-
-        if lay.audio.contains(mx, my) {
-            Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
-            return;
+        let Some(drag) = self.drag else { return };
+        let bar = match drag { Drag::Volume => lay.volume, Drag::Brightness => lay.brightness, Drag::Timer1 => lay.timer1, Drag::Timer2 => lay.timer2 }.bar();
+        let frac = ((x - bar.x - BAR_T / 2.0) / (bar.w - BAR_T)).clamp(0.0, 1.0);
+        match drag {
+            Drag::Volume => {
+                self.volume = frac * VOL_MAX;
+                self.volume_dirty = true;
+            }
+            Drag::Brightness => {
+                self.brightness = Some(frac.max(BRIGHTNESS_MIN));
+                self.brightness_dirty = true;
+            }
+            Drag::Timer1 | Drag::Timer2 => {
+                let (dur, started, base, config) = if drag == Drag::Timer1 { (&mut self.timer1_duration, self.timer1_started, &mut self.timer1_base, self.timer1_config) } else { (&mut self.timer2_duration, self.timer2_started, &mut self.timer2_base, self.timer2_config) };
+                let secs = ((frac * config as f32 / 60.0).round() as i64 * 60).max(TIMER_SCROLL_STEP);
+                // A paused timer gets a new base; a running one keeps running from the new time
+                if started == 0 {
+                    *dur = secs;
+                    *base = secs;
+                } else {
+                    *dur = secs + now_unix() as i64 - started as i64;
+                }
+            }
         }
-
-        if lay.timer1.contains(mx, my) {
-            self.timer1_duration = self.timer1_config;
-            self.timer1_base = self.timer1_config;
-            self.timer1_started = 0;
-            save_state(&self.state());
-            self.draw();
-            return;
-        }
-
-        if lay.timer2.contains(mx, my) {
-            self.timer2_duration = self.timer2_config;
-            self.timer2_base = self.timer2_config;
-            self.timer2_started = 0;
-            save_state(&self.state());
-            self.draw();
-        }
+        self.draw();
     }
 
-    fn handle_right_click(&mut self, x: f64, y: f64) {
-        let (mx, my) = (x as u32, y as u32);
-        let lay = self.layout();
-
-        if lay.audio.contains(mx, my) {
-            self.refresh_audio();
-            let target = if self.headphones { &self.audio_device_2 } else { &self.bt_device_1 };
-            switch_audio(target);
-            self.refresh_audio();
-            self.draw();
-            return;
-        }
-
-        if lay.timer1.contains(mx, my) {
-            self.timer1_duration = self.timer1_base;
-            self.timer1_started = 0;
-            save_state(&self.state());
-            self.draw();
-            return;
-        }
-
-        if lay.timer2.contains(mx, my) {
-            self.timer2_duration = self.timer2_base;
-            self.timer2_started = 0;
-            save_state(&self.state());
-            self.draw();
-        }
+    fn end_drag(&mut self) {
+        if matches!(self.drag, Some(Drag::Timer1 | Drag::Timer2)) { save_state(&self.state()); }
+        self.drag = None;
     }
 
-    fn hover_tile_at(&self, x: f64, y: f64) -> HoverTile {
-        let (mx, my) = (x as u32, y as u32);
-        let lay = self.layout();
+    fn handle_scroll(&mut self, x: f32, y: f32, dy: f64) {
+        let sign = if dy > 0.0 { -1.0 } else { 1.0 };
+        match self.hover_at(x, y) {
+            Hover::Volume => {
+                self.volume = (self.volume + sign * VOL_SCROLL_STEP).clamp(0.0, VOL_MAX);
+                self.volume_dirty = true;
+            }
+            Hover::Brightness => {
+                let Some(b) = self.brightness else { return };
+                self.brightness = Some((b + sign * BRIGHTNESS_SCROLL_STEP).clamp(BRIGHTNESS_MIN, 1.0));
+                self.brightness_dirty = true;
+            }
+            which @ (Hover::Timer1 | Hover::Timer2) => {
+                let (dur, base) = if which == Hover::Timer1 { (&mut self.timer1_duration, &mut self.timer1_base) } else { (&mut self.timer2_duration, &mut self.timer2_base) };
+                *dur = (*dur + sign as i64 * TIMER_SCROLL_STEP).max(TIMER_SCROLL_STEP);
+                *base = *dur;
+                save_state(&self.state());
+            }
+            _ => return,
+        }
+        self.draw();
+    }
 
-        if lay.date.contains(mx, my) { return HoverTile::Date; }
-        if lay.toggle.contains(mx, my) { return HoverTile::Toggle; }
-        if lay.notif.contains(mx, my) { return HoverTile::Notif; }
-        if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
-        if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
-        if lay.alert.contains(mx, my) { return HoverTile::Alert; }
-        if lay.volume.contains(mx, my) { return HoverTile::Volume; }
-        if lay.brightness.contains(mx, my) { return HoverTile::Brightness; }
-        if lay.audio.contains(mx, my) { return HoverTile::Audio; }
-        HoverTile::None
+    fn handle_middle_click(&mut self, x: f32, y: f32) {
+        match self.hover_at(x, y) {
+            Hover::Volume | Hover::Output => {
+                Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+            }
+            Hover::Timer1 => self.reset_timer(1, true),
+            Hover::Timer2 => self.reset_timer(2, true),
+            _ => return,
+        }
+        self.draw();
+    }
+
+    fn handle_right_click(&mut self, x: f32, y: f32) {
+        match self.hover_at(x, y) {
+            Hover::Timer1 => self.reset_timer(1, false),
+            Hover::Timer2 => self.reset_timer(2, false),
+            _ => return,
+        }
+        self.draw();
     }
 }
 
@@ -1043,23 +915,29 @@ fn chrono_now() -> (u32, u32, u32) {
     (tm.tm_hour as u32, tm.tm_min as u32, tm.tm_sec as u32)
 }
 
+// "2:57 pm"
+fn clock_text() -> String {
+    let (h, m, _) = chrono_now();
+    format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "am" } else { "pm" })
+}
+
+// "Sun, Nov 1"
 fn format_date() -> String {
     let secs = now_unix();
     let t = secs as i64;
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
     unsafe { libc::localtime_r(&t as *const i64, &mut tm) };
     let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let months = ["January", "February", "March", "April", "May", "June",
-                  "July", "August", "September", "October", "November", "December"];
-    let day = days[tm.tm_wday as usize];
-    let month = months[tm.tm_mon as usize];
-    format!("{}, {} {}", day, month, tm.tm_mday)
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    format!("{}, {} {}", days[tm.tm_wday as usize], months[tm.tm_mon as usize], tm.tm_mday)
 }
 
 // --- Rendering helpers ---
 
-fn alpha_color(c: [u8; 3], a: f32) -> [u8; 3] {
-    [(c[0] as f32 * a) as u8, (c[1] as f32 * a) as u8, (c[2] as f32 * a) as u8]
+// `c` at opacity `a` over the background color
+fn fade(c: [u8; 3], bg: [u8; 3], a: f32) -> [u8; 3] {
+    let mix = |i: usize| (c[i] as f32 * a + bg[i] as f32 * (1.0 - a)) as u8;
+    [mix(0), mix(1), mix(2)]
 }
 
 fn hover_color(c: [u8; 3], hovered: bool) -> [u8; 3] {
@@ -1072,9 +950,9 @@ fn hover_color(c: [u8; 3], hovered: bool) -> [u8; 3] {
 fn timer_color(c: &Colors, t: f32, rem: i64, started: u64, hovered: bool) -> [u8; 3] {
     if started > 0 && rem <= 0 {
         let pulse = 0.5 + 0.5 * (t * std::f32::consts::PI).sin();
-        return alpha_color(hover_color(c.accentr, hovered), 0.5 + 0.5 * pulse);
+        return fade(hover_color(c.accentr, hovered), c.background, 0.5 + 0.5 * pulse);
     }
-    alpha_color(hover_color(c.timer, hovered), if started > 0 { 1.0 } else { 0.7 })
+    fade(hover_color(c.timer, hovered), c.background, if started > 0 { 1.0 } else { DIM })
 }
 
 fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
@@ -1102,34 +980,76 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
     }
 }
 
-fn fill_rounded_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, r: u32, c: [u8; 3], a: u8) {
-    if a == 0 || w == 0 || h == 0 { return; }
-    let r = r.min(w / 2).min(h / 2);
-    let a32 = a as u32;
-    let inv = 255 - a32;
-    for py in y..y.saturating_add(h).min(ph) {
-        for px in x..x.saturating_add(w).min(pw) {
-            let lx = px - x;
-            let ly = py - y;
-            // Check if pixel is in a corner region and outside the rounded arc
-            let in_corner = (lx < r && ly < r) || (lx >= w - r && ly < r) || (lx < r && ly >= h - r) || (lx >= w - r && ly >= h - r);
-            if in_corner {
-                let cx = if lx < r { r } else { w - r };
-                let cy = if ly < r { r } else { h - r };
-                let dx = lx as f32 - cx as f32 + 0.5;
-                let dy = ly as f32 - cy as f32 + 0.5;
-                if dx * dx + dy * dy > (r as f32) * (r as f32) { continue; }
-            }
-            let i = (py as usize * pw as usize + px as usize) * 4;
-            if a == 0xff {
-                data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2]; data[i + 3] = 0xff;
-            } else {
-                data[i]     = ((c[0] as u32 * a32 + data[i] as u32 * inv) / 255) as u8;
-                data[i + 1] = ((c[1] as u32 * a32 + data[i + 1] as u32 * inv) / 255) as u8;
-                data[i + 2] = ((c[2] as u32 * a32 + data[i + 2] as u32 * inv) / 255) as u8;
-                data[i + 3] = ((a32 + data[i + 3] as u32 * inv / 255)) as u8;
-            }
-        }
+// Draws into the panel pixmap. Text, icons and bars are positioned by the top of their row and centered in it.
+struct Painter<'a> {
+    pm: &'a mut Pixmap,
+    fs: &'a mut FontSystem,
+    sc: &'a mut SwashCache,
+    family: &'a str,
+    cw: f32,
+    fg: [u8; 3],
+    dim: [u8; 3],
+    off: [u8; 3],
+    track: [u8; 3],
+}
+
+impl Painter<'_> {
+    fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, c: [u8; 3]) {
+        let (pw, ph) = (self.pm.width(), self.pm.height());
+        fill_rect(self.pm.data_mut(), pw, ph, x as u32, y as u32, w as u32, h as u32, c);
+    }
+
+    fn text(&mut self, s: &str, x: f32, row_y: f32, size: f32, weight: Weight, c: [u8; 3]) {
+        let y = row_y + (ROW_H - size * LINE_HEIGHT) / 2.0;
+        render_text(self.pm, self.fs, self.sc, s, x, y, size, 1000.0, ROW_H, c, self.family, weight);
+    }
+
+    fn icon(&mut self, mask: &[u8], x: f32, row_y: f32, c: [u8; 3]) {
+        let n = (mask.len() as f32).sqrt() as i32;
+        let (pw, ph) = (self.pm.width() as i32, self.pm.height() as i32);
+        let y = (row_y + (ROW_H - n as f32) / 2.0).round() as i32;
+        blit_mask(self.pm.data_mut(), pw, ph, x.round() as i32, y, n, n, mask, &c);
+    }
+
+    // Round-capped track with the filled part on top
+    fn bar(&mut self, r: &Rect, frac: f32, c: [u8; 3]) {
+        let y = r.y + r.h / 2.0;
+        let (x0, x1) = (r.x + BAR_T / 2.0, r.x + r.w - BAR_T / 2.0);
+        self.stroke(x0, x1, y, self.track);
+        if frac > 0.0 { self.stroke(x0, x0 + frac.min(1.0) * (x1 - x0), y, c); }
+    }
+
+    fn stroke(&mut self, x0: f32, x1: f32, y: f32, c: [u8; 3]) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y);
+        pb.line_to(x1, y);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(c[0], c[1], c[2], 255);
+        let stroke = Stroke { width: BAR_T, line_cap: LineCap::Round, ..Stroke::default() };
+        self.pm.stroke_path(&pb.finish().unwrap(), &paint, &stroke, Transform::identity(), None);
+    }
+
+    // A level or timer row: icon and label, bar, then the value and state word flush right
+    fn row(&mut self, r: &Rect, icon: &[u8], label: &str, label_c: [u8; 3], frac: f32, bar_c: [u8; 3], value: &str, value_c: [u8; 3], state: &str) {
+        self.icon(icon, r.x, r.y, label_c);
+        self.text(label, r.x + ICON + ICON_GAP, r.y, TEXT, Weight::NORMAL, label_c);
+        self.bar(&r.bar(), frac, bar_c);
+        let right = r.x + r.w;
+        let state_w = state.chars().count() as f32 * self.cw;
+        let value_x = right - state_w - if state.is_empty() { 0.0 } else { GAP } - value.chars().count() as f32 * self.cw;
+        self.text(value, value_x, r.y, TEXT, Weight::NORMAL, value_c);
+        self.text(state, right - state_w, r.y, TEXT, Weight::NORMAL, self.dim);
+    }
+
+    // Off toggles are dimmed (their icon is the slashed variant)
+    fn toggle(&mut self, r: &Rect, icon: &[u8], label: &str, on: bool, hovered: bool) {
+        let (icon_c, label_c) = match (on, hovered) {
+            (true, false) => (self.fg, self.dim),
+            (true, true) => (self.fg, self.fg),
+            (false, h) => (hover_color(self.off, h), hover_color(self.off, h)),
+        };
+        self.icon(icon, r.x, r.y, icon_c);
+        self.text(label, r.x + ICON + ICON_GAP, r.y, TEXT, Weight::NORMAL, label_c);
     }
 }
 
@@ -1166,10 +1086,8 @@ fn render_text(
                 let y0 = physical.y - image.placement.top;
                 let w = image.placement.width as i32;
                 let h = image.placement.height as i32;
-                match image.content {
-                    SwashContent::Mask => blit_mask(pixmap.data_mut(), pw, ph, x0, y0, w, h, &image.data, &color),
-                    SwashContent::Color => blit_color(pixmap.data_mut(), pw, ph, x0, y0, w, h, &image.data),
-                    SwashContent::SubpixelMask => {}
+                if let SwashContent::Mask = image.content {
+                    blit_mask(pixmap.data_mut(), pw, ph, x0, y0, w, h, &image.data, &color);
                 }
             }
         }
@@ -1195,24 +1113,111 @@ fn blit_mask(data: &mut [u8], pw: i32, ph: i32, x0: i32, y0: i32, w: i32, h: i32
     }
 }
 
-fn blit_color(data: &mut [u8], pw: i32, ph: i32, x0: i32, y0: i32, w: i32, h: i32, rgba: &[u8]) {
-    for gy in 0..h {
-        let py = y0 + gy;
-        if py < 0 || py >= ph { continue; }
-        for gx in 0..w {
-            let px = x0 + gx;
-            if px < 0 || px >= pw { continue; }
-            let si = (gy * w + gx) as usize * 4;
-            let a = rgba[si + 3] as u32;
-            if a == 0 { continue; }
-            let i = (py * pw + px) as usize * 4;
-            let inv = 255 - a;
-            data[i]     = (rgba[si] as u32 * a / 255 + data[i] as u32 * inv / 255) as u8;
-            data[i + 1] = (rgba[si + 1] as u32 * a / 255 + data[i + 1] as u32 * inv / 255) as u8;
-            data[i + 2] = (rgba[si + 2] as u32 * a / 255 + data[i + 2] as u32 * inv / 255) as u8;
-            data[i + 3] = (a + data[i + 3] as u32 * inv / 255) as u8;
+// --- Icons ---
+// Drawn on a 24-unit grid in the style of Font Awesome Solid (weather in the outline style of FA Regular).
+// Class "s" is a 2-unit round stroke. A `_HOLES` string is cut out of the icon above it.
+
+const ICON_VOL: &str = r#"<path d="M3 9v6h4l5 4V5L7 9H3z"/><path class="s" d="M15.5 9.5a3.5 3.5 0 0 1 0 5M18 7a7 7 0 0 1 0 10"/>"#;
+const ICON_BRI: &str = r#"<circle cx="12" cy="12" r="4.5"/><path class="s" d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/>"#;
+const ICON_BAT: &str = r#"<rect class="s" x="2" y="7" width="18" height="10" rx="2"/><rect x="21" y="10" width="2" height="4" rx=".5"/>"#;
+const ICON_BOLT: &str = r#"<path d="M12.6 8.3 9.3 12.6h2.3l-.9 3.1 3.3-4.4h-2.3z"/>"#;
+const ICON_TIMER: &str = r#"<circle cx="12" cy="13.5" r="7.5"/><rect x="9.5" y="2" width="5" height="2.5" rx="1"/><rect x="11" y="4" width="2" height="2.5"/>"#;
+const ICON_TIMER_HOLES: &str = r#"<path class="s" d="M12 13.5V9.5"/>"#;
+const ICON_CAL: &str = r#"<path d="M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2H3z"/><rect class="s" x="3" y="6" width="18" height="15" rx="2"/><path class="s" d="M8 3.5V7M16 3.5V7"/>"#;
+const ICON_BELL: &str = r#"<path d="M12 2.5a1.5 1.5 0 0 1 1.5 1.5v.7a5.5 5.5 0 0 1 4 5.3V15l1.7 2a1 1 0 0 1-.8 1.6H5.6a1 1 0 0 1-.8-1.6L6.5 15v-5a5.5 5.5 0 0 1 4-5.3v-.7A1.5 1.5 0 0 1 12 2.5z"/><path d="M9.8 20a2.2 2.2 0 0 0 4.4 0z"/>"#;
+const ICON_ALARM: &str = r#"<circle cx="12" cy="13" r="7.5"/><path class="s" d="M4 6.5l3-2.8M20 6.5l-3-2.8M5.5 21l2-2.2M18.5 21l-2-2.2"/>"#;
+const ICON_ALARM_HOLES: &str = r#"<path class="s" d="M12 9.5V13l2.5 1.8"/>"#;
+const ICON_PHONES: &str = r#"<path class="s" style="stroke-width:2.4" d="M4 15.5V12a8 8 0 0 1 16 0v3.5"/><rect x="2.5" y="14" width="4.5" height="7" rx="1.5"/><rect x="17" y="14" width="4.5" height="7" rx="1.5"/>"#;
+const ICON_SPEAKER: &str = r#"<rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="15" r="1.4"/>"#;
+const ICON_SPEAKER_HOLES: &str = r#"<circle class="s" style="stroke-width:2.2" cx="12" cy="15" r="2.5"/><circle cx="12" cy="7" r="1.5"/>"#;
+const ICON_MOON: &str = r#"<path d="M12 3a6.5 6.5 0 0 0 9 9 9 9 0 1 1-9-9z"/>"#;
+const SLASH_GAP: &str = r#"<path class="s" style="stroke-width:4.5" d="M3 3l18 18"/>"#;
+const SLASH: &str = r#"<path class="s" d="M3 3l18 18"/>"#;
+// Indexed by weather_kind: clear day, clear night, cloudy, fog, rain, snow, storm
+const WEATHER_ICONS: [&str; 7] = [
+    r#"<circle class="s" cx="12" cy="12" r="4"/><path class="s" d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>"#,
+    r#"<path class="s" d="M12 3a6.5 6.5 0 0 0 9 9 9 9 0 1 1-9-9z"/>"#,
+    r#"<path class="s" d="M6.5 19a4.5 4.5 0 0 1-.4-8.98 6 6 0 0 1 11.6-1.02A5 5 0 0 1 17.5 19z"/>"#,
+    r#"<path class="s" d="M3 6h14M7 12h14M3 18h14"/>"#,
+    r#"<g transform="translate(2.4 -1.5) scale(.8)"><path class="s" style="stroke-width:2.5" d="M6.5 19a4.5 4.5 0 0 1-.4-8.98 6 6 0 0 1 11.6-1.02A5 5 0 0 1 17.5 19z"/></g><path class="s" d="M8 17.5l-1.2 3.5M12 17.5l-1.2 3.5M16 17.5l-1.2 3.5"/>"#,
+    r#"<path class="s" d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9"/>"#,
+    r#"<path class="s" d="M13 2.5 5 13.5h6.5l-1 8 8-11h-6.5z"/>"#,
+];
+
+// Alpha masks, `n` px square, rasterized once at startup
+struct Icons {
+    n: u32,
+    vol: Vec<u8>,
+    vol_off: Vec<u8>,
+    bri: Vec<u8>,
+    bat: Vec<u8>,
+    bolt: Vec<u8>,
+    timer: Vec<u8>,
+    cal: Vec<u8>,
+    bell: Vec<u8>,
+    bell_off: Vec<u8>,
+    alarm: Vec<u8>,
+    alarm_off: Vec<u8>,
+    phones: Vec<u8>,
+    speaker: Vec<u8>,
+    moon: Vec<u8>,
+    weather: Vec<Vec<u8>>,
+}
+
+impl Icons {
+    fn new(n: u32) -> Self {
+        let r = |body: &str| raster(body, n);
+        let (gap, line) = (r(SLASH_GAP), r(SLASH));
+        let slashed = |m: &[u8]| -> Vec<u8> { cut(m, &gap).iter().zip(&line).map(|(&a, &b)| a.max(b)).collect() };
+        let vol = r(ICON_VOL);
+        let bell = r(ICON_BELL);
+        let alarm = cut(&r(ICON_ALARM), &r(ICON_ALARM_HOLES));
+        Icons {
+            n,
+            vol_off: slashed(&vol),
+            vol,
+            bri: r(ICON_BRI),
+            bat: r(ICON_BAT),
+            bolt: r(ICON_BOLT),
+            timer: cut(&r(ICON_TIMER), &r(ICON_TIMER_HOLES)),
+            cal: r(ICON_CAL),
+            bell_off: slashed(&bell),
+            bell,
+            alarm_off: slashed(&alarm),
+            alarm,
+            phones: r(ICON_PHONES),
+            speaker: cut(&r(ICON_SPEAKER), &r(ICON_SPEAKER_HOLES)),
+            moon: r(ICON_MOON),
+            weather: WEATHER_ICONS.iter().map(|b| r(b)).collect(),
         }
     }
+}
+
+fn raster(body: &str, n: u32) -> Vec<u8> {
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><style>.s{{fill:none;stroke:#000;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}}</style>{body}</svg>"#);
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).unwrap();
+    let mut pm = resvg::tiny_skia::Pixmap::new(n, n).unwrap();
+    let k = n as f32 / 24.0;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut pm.as_mut());
+    pm.pixels().iter().map(|p| p.alpha()).collect()
+}
+
+// `a` with `b`'s coverage removed
+fn cut(a: &[u8], b: &[u8]) -> Vec<u8> {
+    a.iter().zip(b).map(|(&a, &b)| (a as u32 * (255 - b as u32) / 255) as u8).collect()
+}
+
+// The charge level inside the battery outline. While charging the bolt is inverted against it,
+// so it shows as a hole in the fill and as solid where the battery is empty.
+fn battery_fill(n: u32, frac: f32, bolt: Option<&[u8]>) -> Vec<u8> {
+    let k = n as f32 / 24.0;
+    let (x0, x1, y0, y1) = (4.5 * k, (4.5 + 13.0 * frac.clamp(0.0, 1.0)) * k, 9.5 * k, 14.5 * k);
+    let cover = |a: f32, b: f32, p: f32| (b.min(p + 1.0) - a.max(p)).clamp(0.0, 1.0);
+    (0..n * n).map(|i| {
+        let (px, py) = ((i % n) as f32, (i / n) as f32);
+        let fill = (cover(x0, x1, px) * cover(y0, y1, py) * 255.0) as i32;
+        bolt.map_or(fill, |b| (fill - b[i as usize] as i32).abs()) as u8
+    }).collect()
 }
 
 // --- Wayland handler boilerplate ---
@@ -1247,38 +1252,37 @@ impl SeatHandler for App {
 impl PointerHandler for App {
     fn pointer_frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, pointer: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         for event in events {
+            let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             match event.kind {
                 PointerEventKind::Enter { serial } => {
                     let device = self.cursor_shape_manager.get_shape_device(pointer, qh);
                     device.set_shape(serial, Shape::Default);
                     device.destroy();
                 }
-                PointerEventKind::Press { button: 0x110, .. } => {
-                    self.handle_click(event.position.0, event.position.1);
-                }
-                PointerEventKind::Press { button: 0x111, .. } => {
-                    self.handle_right_click(event.position.0, event.position.1);
-                }
-                PointerEventKind::Press { button: 0x112, .. } => {
-                    self.handle_middle_click(event.position.0, event.position.1);
-                }
-                PointerEventKind::Release { .. } => {}
+                PointerEventKind::Press { button: 0x110, .. } => self.handle_click(x, y),
+                PointerEventKind::Press { button: 0x111, .. } => self.handle_right_click(x, y),
+                PointerEventKind::Press { button: 0x112, .. } => self.handle_middle_click(x, y),
+                PointerEventKind::Release { button: 0x110, .. } => self.end_drag(),
                 PointerEventKind::Motion { .. } => {
-                    let new_hover = self.hover_tile_at(event.position.0, event.position.1);
-                    if new_hover != self.hover {
-                        self.hover = new_hover;
-                        self.draw();
+                    if self.drag.is_some() {
+                        self.drag_to(x);
+                    } else {
+                        let new_hover = self.hover_at(x, y);
+                        if new_hover != self.hover {
+                            self.hover = new_hover;
+                            self.draw();
+                        }
                     }
                 }
                 PointerEventKind::Leave { .. } => {
-                    if self.hover != HoverTile::None {
-                        self.hover = HoverTile::None;
+                    if self.hover != Hover::None {
+                        self.hover = Hover::None;
                         self.draw();
                     }
                 }
                 PointerEventKind::Axis { ref vertical, .. } => {
                     if vertical.absolute != 0.0 {
-                        self.handle_scroll(event.position.0, event.position.1, vertical.absolute);
+                        self.handle_scroll(x, y, vertical.absolute);
                     }
                 }
                 _ => {}
@@ -1372,30 +1376,27 @@ fn main() {
     let shm = Shm::bind(&globals, &qh).unwrap();
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
+    // The panel's height depends on which level rows this machine has
+    let battery = read_battery();
+    let brightness = read_brightness();
+    let (width, height) = (WIDTH.round() as u32, panel_height(1 + battery.is_some() as u32 + brightness.is_some() as u32));
+
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("wavedash"), None);
-    layer.set_size(WIDTH, HEIGHT);
+    layer.set_size(width, height);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.wl_surface().commit();
 
-    let pool = SlotPool::new((WIDTH * HEIGHT * 4) as usize, &shm).unwrap();
+    let pool = SlotPool::new((width * height * 4) as usize, &shm).unwrap();
 
-    let font_data = std::fs::read(expand_path(&cfg.font)).expect("failed to read font file");
-    let icon_data = std::fs::read(expand_path(&cfg.icon_font)).expect("failed to read icon font file");
+    // Regular and bold faces of one family, selected by weight
     let mut db = cosmic_text::fontdb::Database::new();
-    db.load_font_data(font_data);
+    db.load_font_data(std::fs::read(expand_path(&cfg.font)).expect("failed to read font file"));
+    db.load_font_data(std::fs::read(expand_path(&cfg.font_bold)).expect("failed to read bold font file"));
     let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
-    db.load_font_data(icon_data);
-    let icon_family = db.faces().last().expect("icon font file contains no faces").families[0].0.clone();
-    // Load FA Regular for outline icons (same family, Weight::NORMAL);
-    // falls back to Solid for its glyphs when neither path exists
-    for dir in [PathBuf::from("/usr/share/fonts/OTF"), home().join(".local/share/fonts")] {
-        if let Ok(data) = std::fs::read(dir.join("Font Awesome 7 Free-Regular-400.otf")) {
-            db.load_font_data(data);
-            break;
-        }
-    }
-    let font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let cw = measure_text(&mut font_system, "0000000000", TEXT, &font_family, Weight::NORMAL) / 10.0;
+    let clock_cw = measure_text(&mut font_system, "0000000000", CLOCK, &font_family, Weight::BOLD) / 10.0;
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -1406,14 +1407,16 @@ fn main() {
         pointer: None,
         cursor_shape_manager,
         pool,
-        width: WIDTH,
-        height: HEIGHT,
+        width,
+        height,
         exit: false,
         font_system,
         swash_cache: SwashCache::new(),
         colors,
         font_family,
-        icon_family,
+        icons: Icons::new(ICON.round() as u32),
+        cw,
+        clock_cw,
         timer1_duration: st.timer1_duration,
         timer1_started: st.timer1_started,
         timer2_duration: st.timer2_duration,
@@ -1427,7 +1430,10 @@ fn main() {
         bt_device_1: cfg.bt_device_1,
         audio_device_2: cfg.audio_device_2,
         is_dim: false,
-        hover: HoverTile::None,
+        hover: Hover::None,
+        drag: None,
+        volume_dirty: false,
+        brightness_dirty: false,
         timer1_base: st.timer1_base,
         timer2_base: st.timer2_base,
         timer1_config: cfg.timer1_duration as i64,
@@ -1440,9 +1446,9 @@ fn main() {
         weather_is_day: st.weather_is_day,
         weather_fetched: st.weather_fetched,
         weather_fetch,
-        battery: read_battery(),
+        battery,
         battery_read_at: now_unix(),
-        brightness: read_brightness(),
+        brightness,
         brightness_set_at: 0,
         notif_paused,
         long_press: None,
@@ -1460,7 +1466,17 @@ fn main() {
             app.exit = true;
             return TimeoutAction::Drop;
         }
-        if app.audio_refreshed.elapsed().as_millis() >= AUDIO_REFRESH_MS && now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
+        if app.volume_dirty {
+            set_volume(app.volume);
+            app.volume_dirty = false;
+            app.volume_set_at = now_unix();
+        }
+        if app.brightness_dirty {
+            set_brightness(app.brightness.unwrap());
+            app.brightness_dirty = false;
+            app.brightness_set_at = now_unix();
+        }
+        if app.drag.is_none() && app.audio_refreshed.elapsed().as_millis() >= AUDIO_REFRESH_MS && now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.refresh_audio();
             app.audio_refreshed = Instant::now();
         }
@@ -1469,7 +1485,7 @@ fn main() {
             app.battery_read_at = now_unix();
         }
         // Re-read backlight (external hotkeys) unless we just set it
-        if app.brightness.is_some() && now_unix() - app.brightness_set_at >= AUDIO_REFRESH_COOLDOWN {
+        if app.drag.is_none() && app.brightness.is_some() && now_unix() - app.brightness_set_at >= AUDIO_REFRESH_COOLDOWN {
             app.brightness = read_brightness();
         }
         // Poll background weather fetch
