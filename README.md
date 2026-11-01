@@ -65,6 +65,7 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `weather_lon` | `0.0` |
 | `weather_max_age` | `3600` |
 | `alert_sound` | `~/.config/widgets/wavedash-alarm.wav` |
+| `alert_volume` | `1.0` |
 
 ### wallrun
 
@@ -110,6 +111,7 @@ Usage: `tincture [image]` — edits the walrs cache entry for that image (defaul
 | --- | --- |
 | `color_file` | `~/.cache/wal/colors-evoke.toml` |
 | `openai_api_key` | (required) |
+| `anthropic_api_key` | (required for `[cleanup]`) |
 | `font` | `~/.local/share/fonts/GoogleSansCode-Regular.ttf` |
 | `font_size` | `16.0` |
 | `width` | `600` |
@@ -125,6 +127,6 @@ Usage: `tincture [image]` — edits the walrs cache entry for that image (defaul
 | `keywords` | `[]` |
 | `send` | `ime` (or `paste`) |
 | `[replace]` | whole-word fixes, e.g. `Hyperland = "Hyprland"` |
-| `[cleanup]` | optional LLM cleanup: `base_url` (`https://api.openai.com/v1`), `model` (`gpt-6-luna`), `reasoning_effort`, `api_key`, `prompt` |
+| `[cleanup]` | optional LLM cleanup via the Anthropic API: `model` (`claude-haiku-5-5`), `prompt` |
 
 Usage totals (audio seconds / tokens as reported by the API) accumulate in `~/.local/state/widgets/evoke.toml`.

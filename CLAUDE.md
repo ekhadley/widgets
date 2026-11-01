@@ -142,6 +142,7 @@ weather_lat = 38.81
 weather_lon = -89.95
 weather_max_age = 1800   # seconds before the cached weather is refetched
 alert_sound = "~/.config/widgets/wavedash-alarm.wav"   # played by pw-play when a timer hits zero with the alarm on
+alert_volume = 1.0       # 0.0-1.0, linear gain passed to pw-play --volume (also applies to the preview)
 ```
 (`font_size` is also accepted but unused — all text sizes come from the type scale constants.)
 
@@ -201,17 +202,17 @@ Speech-to-text overlay — streams the mic to OpenAI's realtime transcription AP
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, cosmic-text, tungstenite (rustls/ring), ureq, serde_json, data-encoding, serde + toml
 
-Single file: `src/main.rs`. Layer-shell overlay with exclusive keyboard + pointer input. Draws straight into the BGRA SHM buffer with one `blend()` helper (no tiny-skia).
+Single file: `src/main.rs`. Layer-shell overlay with on-demand keyboard focus (focused only while hovered, per Hyprland focus-follows-mouse) + pointer input. Draws straight into the BGRA SHM buffer with one `blend()` helper (no tiny-skia).
 
 **Features:**
 - Records via `pw-record` (24 kHz mono s16le — the only rate the realtime API accepts); a small waveform strip shows the level
 - One OpenAI realtime transcription session per dictation (`wss://api.openai.com/v1/realtime?intent=transcription`, model `gpt-live-transcribe`). Words arrive as `...transcription.delta` events while you speak and are appended at the end of the text box as normal editable text; the cursor only follows if it was already at the end
 - Editable while dictating: cosmic-text `Editor` — arrows/Home/End (Shift selects, Ctrl by word/buffer), Backspace/Delete/Ctrl+Backspace, Ctrl+A/C/X/V (wl-copy / wl-paste), Ctrl+Z / Ctrl+Shift+Z (edits within 1s merge into one undo step), click/double/triple-click/drag. The box grows upward to `max_lines`, then scrolls with the cursor
-- Enter (or the `send` label, or SIGUSR1) finishes: stops the mic, waits for the final transcript, applies `[replace]` whole-word fixes, then sends. Shift+Enter inserts a newline, Esc quits, the `copy` label copies and quits
-- Optional LLM cleanup (`[cleanup]` section): the first Enter sends the text to `{base_url}/chat/completions` and replaces it in place as one undoable change (label shows `clean`, then `send`); Ctrl+Z restores the original, the next Enter sends. Editing is locked while it runs
+- Labels in the top row: `copy` (copies and quits), `clean` (only shown with `[cleanup]`; dimmed once the text is cleaned), `send` (sends the text as it is). Enter (or SIGUSR1) cleans first if `[cleanup]` is set and the text isn't cleaned yet, otherwise sends; Ctrl+Enter sends as is. Any of these during dictation first stops the mic, waits for the final transcript and applies `[replace]` whole-word fixes. Shift+Enter inserts a newline, Esc quits
+- Optional LLM cleanup (`[cleanup]` section): the first Enter sends the text to the Anthropic Messages API (Claude Haiku 5.5 by default, thinking disabled) and replaces it in place as one undoable change; Ctrl+Z restores the original, the next Enter sends. Editing is locked while it runs
 - Sending: waits until no key is held and the pointer has been still for 500ms, drops the layer surface (Hyprland refocuses the previous window), then delivers. `send = "ime"` binds `zwp_input_method_v2` and `commit_string`s into the focused text field (no clipboard; newlines become spaces when the field reports content purpose Terminal). `send = "paste"` does `wl-copy` + `hl.dsp.send_shortcut` (Ctrl+Shift+V for terminals) to the window captured at launch. If delivery fails the overlay comes back with the error and the text intact
 - Errors (network, API, cleanup) show in the top row in the border color and are printed to stderr; the text is kept
-- Usage totals: the usage reports the API already returns (the transcription `completed` event and the cleanup response) are summed into `~/.local/state/widgets/evoke.toml` — e.g. `transcribe_seconds` (or token counts, depending on the model), `cleanup_prompt_tokens`, `cleanup_completion_tokens`, and request counts. A dictation cancelled before its transcript completes gets no usage report, so it isn't counted
+- Usage totals: the usage reports the API already returns (the transcription `completed` event and the cleanup response) are summed into `~/.local/state/widgets/evoke.toml` — e.g. `transcribe_seconds` (or token counts, depending on the model), `cleanup_input_tokens`, `cleanup_output_tokens`, and request counts. A dictation cancelled before its transcript completes gets no usage report, so it isn't counted
 
 **Architecture:**
 - `Phase` state machine: `Recording` → `Finishing` (mic stopped, waiting for `completed`) → `Idle` (editing) → `Cleaning` / `Sending`. `request(Then)` advances it from Enter, the buttons and SIGUSR1; `on_down()` handles messages from worker threads
@@ -229,7 +230,8 @@ Single file: `src/main.rs`. Layer-shell overlay with exclusive keyboard + pointe
 **Config** — `~/.config/widgets/evoke.toml`:
 ```toml
 color_file = "~/.cache/wal/colors-evoke.toml"
-openai_api_key = "sk-..."
+openai_api_key = "sk-..."         # transcription
+anthropic_api_key = "sk-ant-..."  # cleanup
 font = "~/.local/share/fonts/GoogleSansCode-Regular.ttf"
 font_size = 16.0
 width = 600
@@ -249,11 +251,8 @@ send = "ime"             # or "paste"
 Hyperland = "Hyprland"
 
 [cleanup]                # optional; omit to send the raw text
-base_url = "https://api.openai.com/v1"   # any OpenAI-compatible chat/completions endpoint
-model = "gpt-6-luna"
-reasoning_effort = "none"                # only sent if set
-# api_key = "..."                        # defaults to openai_api_key
-# prompt = "..."                         # replaces the built-in cleanup prompt
+model = "claude-haiku-5-5"   # any Anthropic model that accepts thinking disabled
+# prompt = "..."             # replaces the built-in cleanup prompt
 ```
 
 **Color keys:** `background`, `background_opacity`, `border` (also used for errors), `waveform`, `text`, `dim` (labels, status, placeholder), `selection`

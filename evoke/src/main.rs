@@ -56,6 +56,7 @@ struct Config {
     bar_gap: u32,
     scale: f32,
     openai_api_key: String,
+    anthropic_api_key: String,
     model: String,
     delay: Option<String>,
     language: Option<String>,
@@ -79,6 +80,7 @@ impl Default for Config {
             bar_gap: 1,
             scale: 20.0,
             openai_api_key: String::new(),
+            anthropic_api_key: String::new(),
             model: "gpt-live-transcribe".into(),
             delay: Some("minimal".into()),
             language: Some("en".into()),
@@ -93,16 +95,13 @@ impl Default for Config {
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 struct Cleanup {
-    base_url: String,
     model: String,
-    api_key: Option<String>,
     prompt: Option<String>,
-    reasoning_effort: Option<String>,
 }
 
 impl Default for Cleanup {
     fn default() -> Self {
-        Self { base_url: "https://api.openai.com/v1".into(), model: "gpt-6-luna".into(), api_key: None, prompt: None, reasoning_effort: None }
+        Self { model: "claude-haiku-5-5".into(), prompt: None }
     }
 }
 
@@ -213,7 +212,7 @@ Output only the cleaned text, with no preamble, quotes or tags.";
 enum Phase { Recording, Finishing, Idle, Cleaning, Sending }
 
 #[derive(PartialEq, Clone, Copy)]
-enum Then { Send, Copy }
+enum Then { Send, Copy, Clean, Raw } // Send cleans first if cleanup is set and the text isn't cleaned yet; Raw sends the text as is
 
 // Main thread -> network thread
 enum Up { Pcm(Vec<u8>), Commit }
@@ -229,7 +228,7 @@ impl Rect {
     fn clip(&self) -> [i32; 4] { [self.x as i32, self.y as i32, (self.x + self.w) as i32, (self.y + self.h) as i32] }
 }
 
-struct Layout { strip: Rect, copy: Rect, send: Rect, text: Rect, height: u32 }
+struct Layout { strip: Rect, copy: Rect, clean: Rect, send: Rect, text: Rect, height: u32 }
 
 // --- Signal ---
 
@@ -312,7 +311,7 @@ impl App {
         layer.set_size(self.config.width, self.height);
         layer.set_anchor(Anchor::BOTTOM);
         layer.set_margin(0, 0, self.margin, 0);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
         layer.wl_surface().commit();
         self.layer = Some(layer);
         self.configured = false;
@@ -322,16 +321,13 @@ impl App {
         let edge = self.config.border_width as f32 + PAD;
         let inner_w = self.config.width as f32 - 2.0 * edge;
         let row_h = self.config.font_size * 1.6;
-        let send_w = if self.send_label() == "clean" { self.label_w[2] } else { self.label_w[1] };
-        let send = Rect { x: edge + inner_w - send_w, y: edge, w: send_w, h: row_h };
-        let copy = Rect { x: send.x - 20.0 - self.label_w[0], y: edge, w: self.label_w[0], h: row_h };
+        let send = Rect { x: edge + inner_w - self.label_w[1], y: edge, w: self.label_w[1], h: row_h };
+        let clean_w = if self.config.cleanup.is_some() { self.label_w[2] } else { 0.0 };
+        let clean = Rect { x: send.x - 20.0 - clean_w, y: edge, w: clean_w, h: row_h };
+        let copy = Rect { x: clean.x - if clean_w > 0.0 { 20.0 } else { 0.0 } - self.label_w[0], y: edge, w: self.label_w[0], h: row_h };
         let strip = Rect { x: edge, y: edge, w: copy.x - 20.0 - edge, h: row_h };
         let text = Rect { x: edge, y: edge + row_h + 8.0, w: inner_w, h: self.lines as f32 * line_height(&self.config) };
-        Layout { strip, copy, send, text, height: (text.y + text.h + edge).ceil() as u32 }
-    }
-
-    fn send_label(&self) -> &'static str {
-        if self.config.cleanup.is_some() && !self.cleaned { "clean" } else { "send" }
+        Layout { strip, copy, clean, send, text, height: (text.y + text.h + edge).ceil() as u32 }
     }
 
     fn text(&self) -> String {
@@ -430,16 +426,18 @@ impl App {
     fn run(&mut self, then: Then) {
         match then {
             Then::Copy => { wl_copy(&self.text()); self.exit = true; }
-            Then::Send if self.text().trim().is_empty() => self.exit = true,
-            Then::Send if self.config.cleanup.is_some() && !self.cleaned => {
+            Then::Send | Then::Raw if self.text().trim().is_empty() => self.exit = true,
+            Then::Send if self.config.cleanup.is_some() && !self.cleaned => self.run(Then::Clean),
+            Then::Clean if self.config.cleanup.is_none() || self.cleaned || self.text().trim().is_empty() => {}
+            Then::Clean => {
                 let c = self.config.cleanup.clone().unwrap();
-                let key = c.api_key.clone().unwrap_or_else(|| self.config.openai_api_key.clone());
+                let key = self.config.anthropic_api_key.clone();
                 let (keywords, text, tx) = (self.config.keywords.clone(), self.text(), self.down.clone());
                 std::thread::spawn(move || { tx.send(cleanup(&c, &key, &keywords, &text).map_or_else(Down::Error, |(s, usage)| Down::Cleaned(s, usage))).ok(); });
                 self.phase = Phase::Cleaning;
                 self.status = None;
             }
-            Then::Send => self.phase = Phase::Sending,
+            Then::Send | Then::Raw => self.phase = Phase::Sending,
         }
     }
 
@@ -532,6 +530,7 @@ impl App {
         match ev.keysym {
             Keysym::Escape => self.exit = true,
             Keysym::Return | Keysym::KP_Enter if self.mods.shift => self.edit(|e, fs| e.action(fs, Action::Enter)),
+            Keysym::Return | Keysym::KP_Enter if ctrl => self.request(Then::Raw),
             Keysym::Return | Keysym::KP_Enter => self.request(Then::Send),
             Keysym::BackSpace if ctrl => self.edit(|e, fs| {
                 if e.selection() == Selection::None {
@@ -587,7 +586,6 @@ impl App {
             self.height = h;
             layer.set_size(w, h);
         }
-        let label = self.send_label();
         let empty = self.end() == Cursor::new(0, 0);
 
         let (wl_buf, canvas) = self.pool.create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888).unwrap();
@@ -622,8 +620,11 @@ impl App {
                 render_text(canvas, w, fs, cache, family, msg, l.strip, cfg.font_size, if *err { c.border } else { c.dim });
             },
         }
-        for (r, text, btn) in [(l.copy, "copy", Then::Copy), (l.send, label, Then::Send)] {
-            render_text(canvas, w, fs, cache, family, text, r, cfg.font_size, if self.hover == Some(btn) { c.text } else { c.dim });
+        let faint = Color::rgba(c.dim.r(), c.dim.g(), c.dim.b(), c.dim.a() / 2);
+        for (r, text, btn) in [(l.copy, "copy", Then::Copy), (l.clean, "clean", Then::Clean), (l.send, "send", Then::Raw)] {
+            if r.w == 0.0 { continue; }
+            let col = if btn == Then::Clean && self.cleaned { faint } else if self.hover == Some(btn) { c.text } else { c.dim };
+            render_text(canvas, w, fs, cache, family, text, r, cfg.font_size, col);
         }
 
         // Text box
@@ -701,19 +702,19 @@ fn stream(key: &str, session: &str, rx: mpsc::Receiver<Up>, tx: &Sender<Down>) -
 fn cleanup(c: &Cleanup, key: &str, keywords: &[String], text: &str) -> Result<(String, Value), String> {
     let mut system = c.prompt.clone().unwrap_or_else(|| CLEANUP_PROMPT.into());
     if !keywords.is_empty() { system += &format!("\nSpell these terms exactly like this: {}.", keywords.join(", ")); }
-    let mut body = json!({ "model": c.model, "messages": [
-        { "role": "system", "content": system },
+    if key.is_empty() { return Err("anthropic_api_key is not set in ~/.config/widgets/evoke.toml".into()); }
+    let body = json!({ "model": c.model, "max_tokens": 16000, "thinking": { "type": "disabled" }, "system": system, "messages": [
         { "role": "user", "content": format!("<transcript>\n{text}\n</transcript>") },
     ]});
-    if let Some(r) = &c.reasoning_effort { body["reasoning_effort"] = json!(r); }
-    let mut resp = ureq::post(format!("{}/chat/completions", c.base_url.trim_end_matches('/')))
-        .header("Authorization", format!("Bearer {key}"))
+    let mut resp = ureq::post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", key).header("anthropic-version", "2023-06-01")
         .config().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build()
         .send_json(&body).map_err(|e| format!("cleanup: {e}"))?;
     let status = resp.status();
     let v: Value = resp.body_mut().read_json().map_err(|e| format!("cleanup ({status}): {e}"))?;
-    match v["choices"][0]["message"]["content"].as_str().map(str::trim) {
-        Some(s) if status.is_success() && !s.is_empty() => Ok((s.to_string(), v["usage"].clone())),
+    let out: String = v["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+    match out.trim() {
+        s if status.is_success() && !s.is_empty() => Ok((s.to_string(), v["usage"].clone())),
         _ => Err(format!("cleanup ({status}): {}", v["error"]["message"].as_str().map_or(v.to_string(), String::from))),
     }
 }
@@ -903,7 +904,7 @@ impl PointerHandler for App {
                     device.destroy();
                 }
                 PointerEventKind::Leave { .. } => self.hover = None,
-                PointerEventKind::Press { button: BTN_LEFT, .. } if !l.copy.contains(x, y) && !l.send.contains(x, y) => {
+                PointerEventKind::Press { button: BTN_LEFT, .. } if !l.copy.contains(x, y) && !l.clean.contains(x, y) && !l.send.contains(x, y) => {
                     self.clicks = if self.last_click.is_some_and(|t| t.elapsed() < Duration::from_millis(400)) { self.clicks % 3 + 1 } else { 1 };
                     self.last_click = Some(Instant::now());
                     let action = match self.clicks {
@@ -916,12 +917,13 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
                     if !self.dragging && l.copy.contains(x, y) { self.request(Then::Copy); }
-                    if !self.dragging && l.send.contains(x, y) { self.request(Then::Send); }
+                    if !self.dragging && l.clean.contains(x, y) { self.request(Then::Clean); }
+                    if !self.dragging && l.send.contains(x, y) { self.request(Then::Raw); }
                     self.dragging = false;
                 }
                 PointerEventKind::Motion { .. } => {
                     if self.dragging { self.editor.action(&mut self.font_system, Action::Drag { x: tx, y: ty }); }
-                    self.hover = if l.copy.contains(x, y) { Some(Then::Copy) } else if l.send.contains(x, y) { Some(Then::Send) } else { None };
+                    self.hover = [(l.copy, Then::Copy), (l.clean, Then::Clean), (l.send, Then::Raw)].into_iter().find(|(r, _)| r.contains(x, y)).map(|(_, t)| t);
                 }
                 _ => {}
             }

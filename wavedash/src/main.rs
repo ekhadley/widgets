@@ -50,6 +50,7 @@ struct Config {
     weather_lon: f64,
     weather_max_age: u64,
     alert_sound: String,
+    alert_volume: f32,
 }
 
 impl Default for Config {
@@ -67,6 +68,7 @@ impl Default for Config {
             weather_lon: 0.0,
             weather_max_age: 3600,
             alert_sound: "~/.config/widgets/wavedash-alarm.wav".into(),
+            alert_volume: 1.0,
         }
     }
 }
@@ -267,6 +269,11 @@ fn format_timer(secs: i64) -> String {
 // the alert sound when it reaches zero. Pausing or restarting the timer changes `started`, which
 // makes the watcher exit, so nothing has to be cancelled explicitly.
 
+fn play_alert(sound: &std::path::Path, volume: f32) -> Child {
+    Command::new("pw-play").args(["--volume", &volume.to_string()]).arg(sound)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+}
+
 fn spawn_alarm(n: u8, started: u64) {
     Command::new("pkill").args(["-f", &format!("wavedash --alarm {n}")]).status().unwrap();
     Command::new(std::env::current_exe().unwrap()).args(["--alarm", &n.to_string(), &started.to_string()])
@@ -288,7 +295,7 @@ fn run_alarm(n: u8, started: u64, cfg: &Config) {
             if !Command::new("pgrep").args(["-x", "wavedash"]).status().unwrap().success() {
                 Command::new(std::env::current_exe().unwrap()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
             }
-            player = Some(Command::new("pw-play").arg(expand_path(&cfg.alert_sound)).spawn().unwrap());
+            player = Some(play_alert(&expand_path(&cfg.alert_sound), cfg.alert_volume));
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -477,6 +484,7 @@ struct App {
     timer2_started: u64,
     alert: bool,
     alert_sound: PathBuf,
+    alert_volume: f32,
     // Audio
     volume: f32,
     muted: bool,
@@ -759,9 +767,9 @@ impl App {
             save_state(&self.state());
             if self.alert {
                 // Preview the sound so output device and volume can be checked
-                Command::new("pw-play").arg(&self.alert_sound).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+                play_alert(&self.alert_sound, self.alert_volume);
             } else {
-                Command::new("pkill").args(["-f", &format!("pw-play {}", self.alert_sound.display())]).status().unwrap();
+                Command::new("pkill").args(["-f", &format!("pw-play .*{}", self.alert_sound.display())]).status().unwrap();
             }
             self.draw();
             return;
@@ -1258,6 +1266,7 @@ fn main() {
         timer2_started: st.timer2_started,
         alert: st.alert,
         alert_sound: expand_path(&cfg.alert_sound),
+        alert_volume: cfg.alert_volume,
         volume,
         muted,
         headphones,
