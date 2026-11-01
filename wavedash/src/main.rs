@@ -45,7 +45,7 @@ struct Config {
     timer1_duration: u64,
     timer2_duration: u64,
     bt_device_1: String,
-    bt_device_2: String,
+    audio_device_2: String,
     weather_lat: f64,
     weather_lon: f64,
     weather_max_age: u64,
@@ -63,7 +63,7 @@ impl Default for Config {
             timer1_duration: 3600,
             timer2_duration: 900,
             bt_device_1: "AC:BF:71:08:A1:D6".into(),
-            bt_device_2: "EC:81:93:AC:8B:60".into(),
+            audio_device_2: "EC:81:93:AC:8B:60".into(),
             weather_lat: 0.0,
             weather_lon: 0.0,
             weather_max_age: 3600,
@@ -110,6 +110,7 @@ struct Colors {
     background_alpha: u8,
     border: [u8; 3],
     divider: [u8; 3],
+    sun: [u8; 3],
     clock: [u8; 3],
     accentl: [u8; 3],
     accentr: [u8; 3],
@@ -132,6 +133,7 @@ impl Default for Colors {
             background_alpha: 0xe6, // ~0.9
             border: [0xcd, 0xd6, 0xf4],
             divider: [0xcd, 0xd6, 0xf4],
+            sun: [0xf9, 0xe2, 0xaf],
             clock: [0x89, 0xb4, 0xfa],
             accentl: [0x89, 0xb4, 0xfa],
             accentr: [0x89, 0xb4, 0xfa],
@@ -184,6 +186,7 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "background" => colors.background = c,
                             "border" => colors.border = c,
                             "divider" => colors.divider = c,
+                            "sun" => colors.sun = c,
                             "clock" => colors.clock = c,
                             "accentl" => colors.accentl = c,
                             "accentr" => colors.accentr = c,
@@ -362,11 +365,18 @@ fn is_headphones(bt_mac: &str) -> bool {
     }
 }
 
-fn switch_audio(target_mac: &str) {
-    Command::new("sh").arg("-c")
-        .arg(format!("{}/scripts/audio_switch.sh {target_mac}",
-            home().join(".config/quickshell").display()))
-        .spawn().ok();
+fn toggle_mute() {
+    assert!(Command::new("wpctl").args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]).status().unwrap().success(), "wpctl set-mute failed");
+}
+
+fn switch_audio(target: &str) {
+    let out = Command::new("pactl").args(["list", "short", "sinks"]).output().unwrap();
+    assert!(out.status.success(), "pactl list sinks: {}", String::from_utf8_lossy(&out.stderr));
+    let sinks = String::from_utf8(out.stdout).unwrap();
+    let target = target.replace(':', "_").to_lowercase();
+    let sink = sinks.lines().filter_map(|line| line.split_whitespace().nth(1))
+        .find(|sink| sink.to_lowercase().contains(&target)).expect("target audio sink is unavailable");
+    assert!(Command::new("pactl").args(["set-default-sink", sink]).status().unwrap().success(), "pactl set-default-sink failed");
 }
 
 // --- Battery ---
@@ -376,6 +386,7 @@ fn switch_audio(target_mac: &str) {
 fn read_battery() -> Option<(f32, bool)> {
     for entry in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
         let path = entry.path();
+        if std::fs::read_to_string(path.join("type")).map_or(true, |t| t.trim() != "Battery") { continue }
         let Ok(cap) = std::fs::read_to_string(path.join("capacity")) else { continue };
         let Ok(pct) = cap.trim().parse::<f32>() else { continue };
         let status = std::fs::read_to_string(path.join("status")).unwrap_or_default();
@@ -471,6 +482,7 @@ impl Rect {
 }
 
 struct Layout {
+    toggle: Rect,
     clock: Rect,
     date: Rect,
     notif: Rect,
@@ -484,34 +496,40 @@ struct Layout {
     audio: Rect,
 }
 
-fn layout(w: u32, h: u32) -> Layout {
+// `brightness` / `battery` say which bars this machine has (sysfs backlight / power supply).
+fn layout(w: u32, h: u32, brightness: bool, battery: bool) -> Layout {
     let lm = LEFT_MARGIN as u32;
     let right = w - lm;
     // Top band: clock (left) + weather (right)
     let top_y: u32 = 8;
     let top_h: u32 = 78;
-    // Bottom section: notif icon row on top; alarm toggle then timers in the old 3-row grid on
-    // the right, while the 3 bars squeeze into the former 2-row span (r1..bottom)
+    // Bottom section: the right side is a 3-row grid (alarm toggle, then the timers). On the left,
+    // icon rows (dim toggle when there is no backlight, notif) take one grid row each and the bar
+    // rows (brightness, battery, volume) split whatever is left.
     let sec_y: u32 = 95;
     let sec_h = h - sec_y;
     let row_h = sec_h / 3;
     let r0 = sec_y;
     let r1 = sec_y + row_h;
     let r2 = sec_y + row_h * 2;
-    let bar_h = (h - r1) / 3;
-    let b0 = r1;
-    let b1 = r1 + bar_h;
-    let b2 = r1 + bar_h * 2;
+    let toggle_h = if brightness { 0 } else { row_h };
+    let notif_y = sec_y + toggle_h;
+    let bars_y = notif_y + row_h;
+    let bars = 1 + brightness as u32 + battery as u32;
+    let bar_h = (h - bars_y) / bars;
+    let bar = |i: u32| Rect { x: lm + BAR_ICON_W, y: bars_y + bar_h * i, w: 200, h: bar_h };
+    let none = Rect { x: 0, y: 0, w: 0, h: 0 };
     let date_y = top_y + (CLOCK_HM_SIZE * LINE_HEIGHT + 6.0) as u32;
     Layout {
         clock: Rect { x: lm, y: top_y, w: 240, h: top_h },
         date: Rect { x: lm, y: date_y, w: 150, h: (DATE_SIZE * LINE_HEIGHT + 4.0) as u32 },
         weather: Rect { x: right - 160, y: top_y, w: 160, h: top_h },
-        notif: Rect { x: lm, y: r0, w: 32, h: row_h },
-        brightness: Rect { x: lm + BAR_ICON_W, y: b0, w: 200, h: bar_h },
-        battery: Rect { x: lm + BAR_ICON_W, y: b1, w: 200, h: bar_h },
-        volume: Rect { x: lm + BAR_ICON_W, y: b2, w: 200, h: bar_h },
-        audio: Rect { x: lm, y: b2, w: BAR_ICON_W, h: bar_h },
+        toggle: Rect { x: lm, y: sec_y, w: 32, h: toggle_h },
+        notif: Rect { x: lm, y: notif_y, w: 32, h: row_h },
+        brightness: if brightness { bar(0) } else { none },
+        battery: if battery { bar(brightness as u32) } else { none },
+        volume: bar(bars - 1),
+        audio: Rect { x: lm, y: bars_y + bar_h * (bars - 1), w: BAR_ICON_W, h: bar_h },
         timer2: Rect { x: right - 120, y: r1, w: 120, h: row_h },
         timer1: Rect { x: right - 120, y: r2, w: 120, h: row_h },
         alert: Rect { x: right - 32, y: r0, w: 32, h: row_h },
@@ -521,7 +539,7 @@ fn layout(w: u32, h: u32) -> Layout {
 // --- Hover ---
 
 #[derive(PartialEq, Clone, Copy)]
-enum HoverTile { None, Notif, Timer1, Timer2, Alert, Volume, Brightness, Audio, Date }
+enum HoverTile { None, Toggle, Notif, Timer1, Timer2, Alert, Volume, Brightness, Audio, Date }
 
 
 // --- App ---
@@ -556,7 +574,9 @@ struct App {
     muted: bool,
     headphones: bool,
     bt_device_1: String,
-    bt_device_2: String,
+    audio_device_2: String,
+    // Dim toggle (hyprsunset via dim_toggle.sh); only shown when there is no backlight
+    is_dim: bool,
     // Hover
     hover: HoverTile,
     // Base durations for reset (scroll-adjusted)
@@ -632,7 +652,7 @@ impl App {
         let c = &self.colors;
         let bg = c.background;
         let bg_a = c.background_alpha;
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
         let hv = self.hover;
 
         let stride = self.width as i32 * 4;
@@ -712,6 +732,15 @@ impl App {
                 &feels_str, feels_x, feels_y,
                 WEATHER_FEELS_SIZE, 100.0, 30.0, alpha_color(c.weather, 0.5),
                 &self.font_family, Weight::BOLD);
+        }
+
+        // --- Dim toggle (sun/moon per weather is_day; only when there is no brightness bar) ---
+        if lay.toggle.h > 0 {
+            let icon = if self.weather_is_day { "\u{f185}" } else { "\u{f186}" };
+            render_text(&mut pixmap, &mut self.font_system, &mut self.swash_cache,
+                icon, lay.toggle.x as f32 + 3.0, lay.toggle.y as f32 + 6.0,
+                UTIL_ICON_SIZE, 30.0, 30.0, hover_color(c.sun, hv == HoverTile::Toggle),
+                fa, Weight::BLACK);
         }
 
         // --- Notif icon (left, above the bars) ---
@@ -837,9 +866,21 @@ impl App {
         self.layer.wl_surface().commit();
     }
 
+    fn layout(&self) -> Layout {
+        layout(self.width, self.height, self.brightness.is_some(), self.battery.is_some())
+    }
+
     fn handle_click(&mut self, x: f64, y: f64) {
         let (mx, my) = (x as u32, y as u32);
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
+
+        if lay.toggle.contains(mx, my) {
+            let arg = if self.is_dim { "1" } else { "0" };
+            Command::new("sh").arg("-c").arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}", home().display())).spawn().ok();
+            self.is_dim = !self.is_dim;
+            self.draw();
+            return;
+        }
 
         if lay.notif.contains(mx, my) {
             Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
@@ -870,17 +911,15 @@ impl App {
         }
 
         if lay.audio.contains(mx, my) {
-            let target = if self.headphones { &self.bt_device_2 } else { &self.bt_device_1 };
-            let target = target.clone();
-            switch_audio(&target);
-            self.headphones = !self.headphones;
+            toggle_mute();
+            self.refresh_audio();
             self.draw();
         }
     }
 
     fn handle_scroll(&mut self, x: f64, y: f64, dy: f64) {
         let (mx, my) = (x as u32, y as u32);
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
 
         if lay.volume.contains(mx, my) {
             let delta: f32 = if dy > 0.0 { -VOL_SCROLL_STEP } else { VOL_SCROLL_STEP };
@@ -922,7 +961,7 @@ impl App {
 
     fn handle_middle_click(&mut self, x: f64, y: f64) {
         let (mx, my) = (x as u32, y as u32);
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
 
         if lay.audio.contains(mx, my) {
             Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
@@ -949,7 +988,16 @@ impl App {
 
     fn handle_right_click(&mut self, x: f64, y: f64) {
         let (mx, my) = (x as u32, y as u32);
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
+
+        if lay.audio.contains(mx, my) {
+            self.refresh_audio();
+            let target = if self.headphones { &self.audio_device_2 } else { &self.bt_device_1 };
+            switch_audio(target);
+            self.refresh_audio();
+            self.draw();
+            return;
+        }
 
         if lay.timer1.contains(mx, my) {
             self.timer1_duration = self.timer1_base;
@@ -969,9 +1017,10 @@ impl App {
 
     fn hover_tile_at(&self, x: f64, y: f64) -> HoverTile {
         let (mx, my) = (x as u32, y as u32);
-        let lay = layout(self.width, self.height);
+        let lay = self.layout();
 
         if lay.date.contains(mx, my) { return HoverTile::Date; }
+        if lay.toggle.contains(mx, my) { return HoverTile::Toggle; }
         if lay.notif.contains(mx, my) { return HoverTile::Notif; }
         if lay.timer1.contains(mx, my) { return HoverTile::Timer1; }
         if lay.timer2.contains(mx, my) { return HoverTile::Timer2; }
@@ -1376,7 +1425,8 @@ fn main() {
         muted,
         headphones,
         bt_device_1: cfg.bt_device_1,
-        bt_device_2: cfg.bt_device_2,
+        audio_device_2: cfg.audio_device_2,
+        is_dim: false,
         hover: HoverTile::None,
         timer1_base: st.timer1_base,
         timer2_base: st.timer2_base,

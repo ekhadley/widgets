@@ -107,9 +107,10 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 **Features:**
 - Clock — hero 12-hour H:MM with smaller AM/PM suffix, top-left. Date below ("Mon, July 21"), clickable — opens Google Calendar via `xdg-open`.
 - Weather (top-right) — condition icon + current temp, feels-like below, via open-meteo API (lat/lon config, WMO weather codes). Day/night aware (sun/moon icon for clear skies). Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for `weather_max_age` seconds (default 3600).
-- Left icon column, top to bottom: day/night toggle (sun/moon per weather is_day, click runs `dim_toggle.sh`), notification pause (bell/bell-slash, click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), audio device (headphones/speaker)
-- Audio icon — click switches BT devices via `audio_switch.sh`, middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
-- Volume bar (0-200%) beside the audio icon via `wpctl`, scroll to adjust. Rounded pill-shaped fill bar (track + fill via `fill_rounded_rect_alpha`). Muted dims both icon and bar.
+- Left column, top to bottom: dim toggle (sun/moon per weather is_day, click runs `dim_toggle.sh`; only on machines without a backlight), notification pause (bell/bell-slash, click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), then the bar rows
+- Bar rows (pill-shaped track + fill via `fill_rounded_rect_alpha`, icon in a cell to the left): brightness (sysfs backlight, scroll runs `brightnessctl`), battery (sysfs power supply, green while plugged in, red at or below 20%) and volume. Brightness and battery are hidden on machines that don't have them, and the layout adapts at runtime — one binary serves desktop and laptop.
+- Audio icon — left-click toggles mute via `wpctl`, right-click switches between `bt_device_1` and `audio_device_2` via `pactl` (each is matched as a substring of the sink name, with `:` → `_`, so a BT MAC or a sink name both work), middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset". The icon and volume reflect the actual output after each action.
+- Volume bar (0-200%) beside the audio icon via `wpctl`, scroll to adjust. Muted dims both icon and bar.
 - 2 pomodoro timers stacked bottom-right (short timer on top), right-aligned, dimmed when paused — click to start/pause, right-click to reset to scroll-adjusted base, middle-click to reset to config duration, scroll to adjust duration (+-60s). A finished timer keeps counting negative and breathes in the right accent color until clicked, which resets it to its base.
 - Alarm — alarm-clock icon above the timers toggles it (persisted in state, dimmed when off). Turning it on plays `alert_sound` once as a preview; turning it off also stops any playing alarm. When a timer reaches zero with the alarm on, a detached watcher process plays the sound with `pw-play` and launches the panel if it isn't up.
 - State persists to `~/.local/state/widgets/wavedash.toml` (timers, alarm toggle and weather cache survive close/reopen)
@@ -120,10 +121,10 @@ Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (n
 **Architecture:**
 - `App::draw()` renders to `tiny_skia::Pixmap`, copies RGBA→BGRA into SHM buffer
 - `App::handle_click()` / `handle_scroll()` / `handle_right_click()` / `handle_middle_click()` / `hover_tile_at()` dispatch pointer events via `layout()` + `Rect::contains()`
-- Hit geometry computed by `layout(w, h) -> Layout` returning `Rect` structs for toggle, clock, date, notif, weather, alert, timer1, timer2, volume, audio
+- Hit geometry computed by `layout(w, h, brightness, battery) -> Layout` (called via `App::layout()`) returning `Rect` structs for toggle, clock, date, notif, weather, alert, timer1, timer2, brightness, battery, volume, audio. Icon rows take one grid row each and the bar rows split the rest; absent items get a zero-size `Rect`
 - Alarm: `spawn_alarm(n, started)` runs when a timer starts and at launch for any timer still running — it pkills any existing `wavedash --alarm n` watcher and starts a fresh one, so there is never more than one per timer. `run_alarm()` renames its process to `wavedash-alarm` (so the toggle script's `pkill -x wavedash` leaves it alone), polls the state file every 500ms, exits as soon as the timer's `started` changes (pause, reset, restart), and fires when remaining ≤ 0 and `alert` is set. It keeps polling while the sound plays, so stopping the timer or switching the alarm off cuts the sound.
 - Layout constants: `WIDTH`/`HEIGHT` (440×235), `ACCENT_W`, `LEFT_MARGIN`, plus a type scale (`CLOCK_HM_SIZE`, `DATE_SIZE`, `WEATHER_ICON_SIZE`, `WEATHER_TEMP_SIZE`, `WEATHER_FEELS_SIZE`, `TIMER_SIZE`, `UTIL_ICON_SIZE`)
-- Shells out to `wpctl`, `dunstctl`, `xdg-open`, `pavucontrol`, `pw-play`, `pgrep`/`pkill`, `audio_switch.sh` (in `~/.config/quickshell/scripts/`), and `dim_toggle.sh` (in `~/wgmn/scripts/`)
+- Shells out to `wpctl`, `pactl`, `dunstctl`, `xdg-open`, `pavucontrol`, `pw-play`, `brightnessctl`, `pgrep`/`pkill`, and `dim_toggle.sh` (in `~/wgmn/scripts/`)
 - Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency). `weather_icon()` maps WMO codes to FA icons.
 - Time/date via `libc::localtime_r` (no chrono dependency)
 - calloop `Timer` fires every 33ms for clock/timer/weather redraws (fast enough for the finished-timer pulse to be smooth); volume/mute/headphone state is refreshed every 500ms, skipped for 1s after a scroll-set to avoid fighting `wpctl`
@@ -137,7 +138,7 @@ icon_font = "/usr/share/fonts/OTF/Font Awesome 7 Free-Solid-900.otf"
 timer1_duration = 3600
 timer2_duration = 900
 bt_device_1 = "AC:BF:71:08:A1:D6"
-bt_device_2 = "EC:81:93:AC:8B:60"
+audio_device_2 = "EC:81:93:AC:8B:60"   # second output: BT MAC or a unique substring of the sink name (e.g. "HiFi__Speaker__sink")
 weather_lat = 38.81
 weather_lon = -89.95
 weather_max_age = 1800   # seconds before the cached weather is refetched
@@ -146,7 +147,7 @@ alert_volume = 1.0       # 0.0-1.0, linear gain passed to pw-play --volume (also
 ```
 (`font_size` is also accepted but unused — all text sizes come from the type scale constants.)
 
-**Color keys:** `background`, `background_opacity`, `sun`, `clock`, `accentl`, `accentr`, `weather`, `audio`, `volume`, `notif`, `timer`. Also parsed (and emitted by the walrs template) but not currently rendered: `border`, `divider`, `foreground`, `color1`–`color15`.
+**Color keys:** `background`, `background_opacity`, `sun`, `clock`, `accentl`, `accentr`, `weather`, `audio`, `volume`, `brightness`, `battery`, `battery_charging`, `battery_low`, `notif`, `timer`. Also parsed (and emitted by the walrs template) but not currently rendered: `border`, `divider`, `foreground`, `color1`–`color15`.
 
 ### grimoire
 
@@ -322,6 +323,7 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 
 ### wavedash
 - Network tile — wifi SSID + signal strength or ethernet indicator
+- Hover highlight for the battery bar
 - Better layout abstractions — reduce overhead while adding consistency and styling
 
 ### wallrun

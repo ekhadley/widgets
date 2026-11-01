@@ -999,7 +999,7 @@ fn main() {
 
     // Recording and the network session start immediately; audio queues until the session is ready.
     let mut recorder = Command::new("pw-record")
-        .args(["--format=s16", "--rate=24000", "--channels=1", "-"])
+        .args(["--raw", "--format=s16", "--rate=24000", "--channels=1", "-"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

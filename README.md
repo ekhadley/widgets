@@ -7,6 +7,8 @@ Bespoke Wayland desktop widgets written from scratch in Rust against smithay-cli
 ### wavedash
 Floating status overlay — clock, weather, pomodoro timers with an alarm, volume control, notification pause, theme toggle.
 
+The audio icon uses left-click to toggle mute, right-click to switch between the two configured outputs, and middle-click to open pavucontrol. Brightness and battery bars appear on machines that have a backlight / battery.
+
 ![wavedash](screenshots/wavedash.png)
 
 ### wallrun
@@ -60,7 +62,7 @@ All TOML keys are optional. Background opacity is **not** a TOML key — set `ba
 | `timer1_duration` | `3600` |
 | `timer2_duration` | `900` |
 | `bt_device_1` | `AC:BF:71:08:A1:D6` |
-| `bt_device_2` | `EC:81:93:AC:8B:60` |
+| `audio_device_2` | `EC:81:93:AC:8B:60` (BT MAC or unique substring of the sink name) |
 | `weather_lat` | `0.0` |
 | `weather_lon` | `0.0` |
 | `weather_max_age` | `3600` |
