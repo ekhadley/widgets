@@ -398,7 +398,7 @@ extern "C" fn sigusr2_handler(_: libc::c_int) {
 // --- Layout constants ---
 // Sizes are in design px; S scales the whole panel.
 
-const S: f32 = 1.0;
+const S: f32 = 2.0;
 const WIDTH: f32 = 440.0 * S;
 const PAD: f32 = 6.0 * S;          // panel edge to frame
 const LINE: f32 = 1.0 * S;         // frame and divider thickness
@@ -743,9 +743,10 @@ impl App {
             (lay.timer2, self.timer2_duration, self.timer2_started, self.timer2_config, Hover::Timer2, "t2"),
         ] {
             let rem = timer_remaining(dur, started);
-            let state = if started == 0 { "paused" } else if rem <= 0 { "done" } else { "" };
+            // Padded to the longest word so the value doesn't move when the state changes
+            let state = format!("{:<7}", if started == 0 { "paused" } else if rem <= 0 { "done" } else { "running" });
             let value_c = timer_color(&c, pulse_t, rem, started, hv == which);
-            p.row(&r, &ic.timer, name, label(which), rem as f32 / config as f32, c.timer, &format_timer(rem), value_c, state);
+            p.row(&r, &ic.timer, name, label(which), rem as f32 / config as f32, c.timer, &format_timer(rem), value_c, &state);
         }
 
         // Toggles
