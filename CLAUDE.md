@@ -12,10 +12,10 @@ The project is a Cargo workspace. A single top-level Makefile builds and install
 
 ```
 make install          # build + install all widgets
-make install W=wavedash  # build + install just wavedash
+make install W=rail      # build + install just rail
 ```
 
-Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates a toggle script per widget: `wavedash_toggle` (`pkill -x wavedash || wavedash &`), `evoke_toggle` (`pkill -x -USR1 evoke || evoke &`), and `wallrun_toggle`/`grimoire_toggle` (run the widget unless an instance is already up).
+Binaries go to `~/.local/bin/` (override with `PREFIX=`). The Makefile also generates a toggle script per widget: `rail_toggle` (`pkill -x rail || rail &`), `evoke_toggle` (`pkill -x -USR1 evoke || evoke &`), and `wallrun_toggle`/`grimoire_toggle` (run the widget unless an instance is already up).
 
 `bench.sh` measures startup latency (time until process enters epoll_wait sleep state) over 1000 runs. Usage: `./bench.sh <widget> [args...]`.
 
@@ -47,7 +47,7 @@ All widgets follow the same architecture:
 
 ## cosmic-text rendering
 
-Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (wavedash also has `font_bold`; its icons are its own SVGs, rasterized with resvg). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
+Fonts are loaded by file path, not by family name. Each widget's config specifies `font = "/path/to/font.ttf"` (rail also has `font_bold`; its icons are its own SVGs, rasterized with resvg). At startup, font files are read into memory and loaded into a `fontdb::Database` via `load_font_data()`, then passed to `FontSystem::new_with_locale_and_db()`. This avoids the ~50-150ms cost of `FontSystem::new()` scanning all system fonts. The family name is extracted from the loaded font's metadata for use with `Family::Name(...)` in attrs.
 
 Note: cosmic-text rejects `fontdb::Source::File` — fonts must be loaded as `Source::Binary` (i.e. via `load_font_data(Vec<u8>)`, not `load_font_file(path)`).
 
@@ -94,60 +94,66 @@ color_file = "~/.cache/wal/colors-wallrun"
 
 **Color keys:** `background`, `background_opacity`, `bar_bg`, `bar_border`, `text`, `text_placeholder`, `label`, `selection`, `selection_opacity`
 
-### wavedash
+### rail
 
-Floating overlay for Hyprland — clock, weather, pomodoro timers with an alarm, volume control, notification pause, theme toggle. Launched/killed to toggle (not persistent).
+Status bar for Hyprland across the top of one monitor — clock, date, weather, audio output and volume, pomodoro timers with an alarm, notification pause, dim toggle, colorscheme dots. Launched/killed to toggle (not persistent).
 
 **Stack:** smithay-client-toolkit 0.20, wayland-client, tiny-skia, cosmic-text 0.17, resvg 0.45 (no default features), libc, serde + toml
 
-**Build:** `make install W=wavedash` installs `wavedash` and `wavedash_toggle` to `~/.local/bin/`. `wavedash_toggle` launches wavedash or kills existing instance.
+**Build:** `make install W=rail` installs `rail` and `rail_toggle` to `~/.local/bin/`. `rail_toggle` launches rail or kills the existing instance.
 
-Single file: `src/main.rs`. Layer-shell overlay with no anchors, pointer-only (no keyboard, `KeyboardInteractivity::None`). A ledger: one framed panel of rows in lowercase 12px text, groups separated by 1px dividers — header; level rows; two timer rows; toggle row. 440 wide; the height is computed at startup from the level rows the machine has (235 with battery and backlight, 191 with neither).
+Single file: `src/main.rs`. Layer-shell `Layer::Top` surface anchored top/left/right, `height` px tall, pointer-only (`KeyboardInteractivity::None`). Goes on the `output` named in the config, or on the focused monitor if none is set. One row: a left block from the left edge and a right block flush against the right edge, groups within a block separated by thin vertical rules:
 
-**Rows:**
-- Header — time ("2:57 pm", bold), date ("Sun, Nov 1", clickable — opens Google Calendar via `xdg-open`) and weather ("62° cloudy feels 58°") spread evenly across the row. Weather via open-meteo (lat/lon config, WMO codes mapped to an icon and a word by `weather_kind()`), day/night aware for clear skies. Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for `weather_max_age` seconds (default 3600).
-- Level rows (`vol`, then `bri` and `bat` on machines that have them) and timer rows (`t1`, `t2`) share one shape: icon + label, a thick round-capped bar, then the value and an optional state word flush right ("muted", "charging", "low", "paused", "done").
-  - vol: bar spans 0-200%. Click the bar or drag it to set, scroll the row to adjust, click elsewhere on the row to mute (muted shows a slashed icon and dims the row), middle-click to launch `pavucontrol`. Uses `wpctl`.
-  - bri: sysfs backlight; click/drag the bar or scroll to set via `brightnessctl`.
-  - bat: sysfs power supply. The icon's interior fills with the charge; while plugged in it turns `battery_charging` with a bolt inverted against the fill, at or below 20% it turns `battery_low`. Not interactive.
-  - t1/t2: the bar is the remaining time on the scale of the config duration. Click the row to start/pause, right-click to reset to the scroll-adjusted base, middle-click to reset to the config duration, scroll for ±60s. Click/drag the bar to set the time, snapped to whole minutes (a paused timer also takes it as its base; a running one keeps running from it). A finished timer keeps counting negative and breathes in `accentr` until clicked, which resets it to its base.
-- Toggle row — notif (click toggles `dunstctl set-paused`, initial state from `dunstctl is-paused`), alarm (persisted in state; turning it on plays `alert_sound` once as a preview, turning it off stops any playing alarm), output (shows headphones/speakers by icon and word; click switches between `bt_device_1` and `audio_device_2` via `pactl`, each matched as a substring of the sink name with `:` → `_`; middle-click launches `pavucontrol`), and on machines without a backlight a dim toggle (sun/moon per weather is_day, runs `dim_toggle.sh`). Off toggles show the slashed icon and are dimmed. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
-- Alarm — when a timer reaches zero with the alarm on, a detached watcher process plays the sound with `pw-play` and launches the panel if it isn't up.
-- State persists to `~/.local/state/widgets/wavedash.toml` (timers, alarm toggle and weather cache survive close/reopen)
-- Hover brightens a row's label and value, and toggle labels
-- Long press detection — hold the toggle key >300ms to peek (dismisses on release), tap quickly for persistent toggle mode. Uses SIGUSR2 from a Hyprland `bindr` release binding.
+`time | date | weather | output volume [brightness battery]` ... `| alarm t1 t2 | notif [dim] | palette`
+
+**Items:**
+- time (bold). date ("Tuesday, November 3", click opens Google Calendar via `xdg-open`). weather ("62° clear", then a dimmed "feels 58°"; omitted before the first fetch). Weather via open-meteo (lat/lon config, WMO codes mapped to an icon and a word by `weather_kind()`), day/night aware for clear skies. Fetched on launch via background curl (skipped if `weather_lat` is 0), cached in state for `weather_max_age` seconds (default 3600).
+- Metered items (volume, brightness, t1, t2): icon, a round-capped meter, then the value.
+  - volume: meter spans 0-200%. Click or drag the meter to set, scroll to adjust, click the icon/value to mute (muted shows a slashed, dimmed icon), middle-click launches `pavucontrol`. Uses `wpctl`.
+  - brightness (machines with a backlight): sysfs backlight; click/drag the meter or scroll to set via `brightnessctl`.
+  - t1/t2: the meter is the remaining time on the scale of the config duration. Click to start/pause, right-click to reset to the scroll-adjusted base, middle-click to reset to the config duration, scroll for ±60s. Click/drag the meter to set the time, snapped to whole minutes (a paused timer also takes it as its base; a running one keeps running from it). Stopped timers are dimmed. A finished timer keeps counting negative and its time breathes in `accentr` until clicked, which resets it to its base.
+- battery (machines with one): icon whose interior fills with the charge, plus the percentage. While plugged in the fill is `battery_charging` with a bolt inverted against it; at or below 20% it is `battery_low`. Not interactive.
+- output: headphones/speakers icon; click switches between `bt_device_1` and `audio_device_2` via `pactl`, each matched as a substring of the sink name with `:` → `_`; middle-click launches `pavucontrol`. Headphone detection matches `wpctl inspect` output against the `bt_device_1` MAC or "headphone"/"headset".
+- alarm: toggle, persisted in state; turning it on plays `alert_sound` once as a preview, turning it off stops any playing alarm. When a timer reaches zero with the alarm on, a detached watcher process plays the sound with `pw-play` and launches `rail --pin` if it isn't up.
+- notif: click toggles `dunstctl set-paused` (initial state from `dunstctl is-paused`). dim (machines without a backlight): sun/moon per weather is_day, runs `dim_toggle.sh`. Off toggles show the slashed icon, dimmed.
+- palette: six dots in `color1`-`color6`; click runs `tincture` (no argument, so it edits the current wallpaper's scheme).
+- Hover brightens the item under the pointer. Hit areas extend halfway into the gaps.
+- State persists to `~/.local/state/widgets/rail.toml` (timers, alarm toggle and weather cache survive close/reopen).
+- Peek vs pin: hold the toggle key >300ms to peek — the bar floats over windows (exclusive zone 0) and exits on release. A quick tap pins it: it sets its exclusive zone to `height`, so windows move down. `rail --pin` pins from the start. Uses SIGUSR2 from a Hyprland release binding.
 
 **Architecture:**
-- Sizes are design px in constants (`ROW_H`, `DIV_H`, `LABEL_W`, `VALUE_W`, `BAR_T`, `ICON`, `TEXT`, `CLOCK`, ...), each multiplied by the scale `S`, so resizing the panel is a one-constant change. `panel_height()` sums the rows. Opacities `DIM`/`OFF`/`TRACK`/`RULE` are blended against the background color by `fade()`.
-- `App::layout()` returns named `Rect`s (pixel space): the header items, one full-width rect per level/timer row (zero-size when absent), the toggles, and the divider y positions. `Rect::bar()` gives a row's bar. Text widths come from one measured character advance (`cw`, `clock_cw`) since the font is monospace, so layout needs no shaping.
-- `App::hover_at()` maps a point to a `Hover` value; click, scroll, middle and right click all dispatch on it. A left press on a bar sets `drag` and `drag_to()` follows pointer motion until release (`end_drag()` saves timer state).
-- Scroll and drag only set `volume`/`brightness` and a dirty flag; the 33ms tick applies them with one blocking `wpctl`/`brightnessctl` call, so a fast drag never piles up processes. Volume/mute/headphone state is polled every 500ms except during a drag and for 1s after a set.
-- `App::draw()` paints a `tiny_skia::Pixmap` through `Painter` (`text`, `icon`, `bar`, `row`, `toggle`), then copies RGBA→BGRA into the SHM buffer. Bars are anti-aliased round-capped tiny-skia strokes.
-- Icons are SVG bodies on a 24-unit grid in `ICON_*` / `WEATHER_ICONS` constants (filled, in the style of Font Awesome Solid; weather in outline). `Icons::new()` rasterizes them once at startup with resvg into alpha masks, which `Painter::icon` tints. Holes (`*_HOLES`) and the off-state slash are mask arithmetic (`cut()`), and the battery fill is built per frame by `battery_fill()`. Cut-outs are real transparency, not painted background, so they stay correct on the translucent panel.
-- Alarm: `spawn_alarm(n, started)` runs when a timer starts and at launch for any timer still running — it pkills any existing `wavedash --alarm n` watcher and starts a fresh one, so there is never more than one per timer. `run_alarm()` renames its process to `wavedash-alarm` (so the toggle script's `pkill -x wavedash` leaves it alone), polls the state file every 500ms, exits as soon as the timer's `started` changes (pause, reset, restart), and fires when remaining ≤ 0 and `alert` is set. It keeps polling while the sound plays, so stopping the timer or switching the alarm off cuts the sound.
-- Shells out to `wpctl`, `pactl`, `dunstctl`, `xdg-open`, `pavucontrol`, `pw-play`, `brightnessctl`, `pgrep`/`pkill`, and `dim_toggle.sh` (in `~/wgmn/scripts/`)
-- Weather: background `curl` to open-meteo API, polled via calloop tick. Hand-parsed JSON (no serde_json dependency).
+- Sizes are design px for a 28px bar in `Sz::new()`, multiplied by `height / 28`, so the config `height` scales text, icons, meters and spacing together. If the content is wider than the monitor, rail prints an error on configure. Opacities `DIM`/`OFF`/`TRACK`/`RULE` are blended against the background color by `fade()`.
+- Items are an `Item` enum. `App::groups()` lists the groups of each block (depending on which hardware the machine has), `item_w()` gives each item's width, and `place()` lays groups out with rules between them into a `Layout` of `Seg { item, r, meter }` plus rule x positions. Text widths come from one measured character advance (`cw`, `clock_cw`) since the font is monospace, so layout needs no shaping.
+- `draw()`, click, scroll, middle/right click and drag all dispatch on the `Item` under the pointer (`Layout::at`). A left press on a meter sets `drag` and `drag_to()` follows pointer motion until release (`end_drag()` saves timer state).
+- Event loop: `dispatch(next_timeout())` then `tick()`, so the tick also runs after every pointer event batch. The timeout is 33ms while dragging, during the long-press grace period or a peek, while a timer pulses, or while weather is fetching; otherwise it lands on the next whole second. `tick()` redraws only when `frame_key()` (a string of everything shown) differs from the last drawn frame, or a timer is pulsing.
+- Scroll and drag only set `volume`/`brightness` and a dirty flag; `tick()` applies them with one blocking `wpctl`/`brightnessctl` call per event batch, so a fast drag never piles up processes. Volume/mute/headphone state and the backlight are polled every 2s, except during a drag and for 1s after a set.
+- `App::draw()` paints a `tiny_skia::Pixmap` through `Painter` (`text`, `icon`, `meter`, `dot`, `fill`), then copies RGBA→BGRA into the SHM buffer.
+- Icons are SVG bodies on a 24-unit grid in `ICON_*` / `WEATHER_ICONS` constants (filled, in the style of Font Awesome Solid; weather in outline). `Icons::new()` rasterizes them once at startup with resvg into alpha masks, which `Painter::icon` tints. Holes (`*_HOLES`) and the off-state slash are mask arithmetic (`cut()`), and the battery fill is built per frame by `battery_fill()`. Cut-outs are real transparency, not painted background, so they stay correct on the translucent bar.
+- Alarm: `spawn_alarm(n, started)` runs when a timer starts and at launch for any timer still running — it pkills any existing `rail --alarm n` watcher and starts a fresh one, so there is never more than one per timer. `run_alarm()` renames its process to `rail-alarm` (so the toggle script's `pkill -x rail` leaves it alone), polls the state file every 500ms, exits as soon as the timer's `started` changes (pause, reset, restart), and fires when remaining ≤ 0 and `alert` is set. It keeps polling while the sound plays, so stopping the timer or switching the alarm off cuts the sound.
+- Shells out to `wpctl`, `pactl`, `dunstctl`, `xdg-open`, `pavucontrol`, `pw-play`, `brightnessctl`, `pgrep`/`pkill`, `tincture`, and `dim_toggle.sh` (in `~/wgmn/scripts/`)
+- Weather: background `curl` to open-meteo API, polled in `tick()`. Hand-parsed JSON (no serde_json dependency).
 - Time/date via `libc::localtime_r` (no chrono dependency)
-- calloop `Timer` fires every 33ms for clock/timer/weather redraws (fast enough for the finished-timer pulse to be smooth)
-- Long press: `SIGUSR2` handler via `sigaction` + `AtomicBool` (same pattern as evoke's SIGUSR1). Grace period (`LONG_PRESS_GRACE_MS = 300`) delays the decision — if signal arrives within grace period, short press (persistent); otherwise long press (exit on release). Requires `bindr = CTRL, Control_R, exec, pkill -USR2 -x wavedash` in Hyprland config.
+- Long press: `SIGUSR2` handler via `sigaction` + `AtomicBool` (same pattern as evoke's SIGUSR1). Grace period (`LONG_PRESS_GRACE_MS = 300`) delays the decision — if the signal arrives within it, short press (pin); otherwise long press (peek, exit on release). Requires a release binding sending `pkill -USR2 -x rail` in the Hyprland config.
 
-**Config** — `~/.config/widgets/wavedash.toml` (all optional):
+**Config** — `~/.config/widgets/rail.toml` (all optional):
 ```toml
-color_file = "~/.cache/wal/colors-wavedash.toml"
+height = 32              # bar height in px; text, icons and spacing scale with it
+output = "DP-1"          # pin to a monitor by name; omit for the focused one
+color_file = "~/.cache/wal/colors-rail.toml"
 font = "~/.local/share/fonts/GoogleSansCode-Regular.ttf"
 font_bold = "~/.local/share/fonts/GoogleSansCode-Bold.ttf"   # same family; used for the time
-timer1_duration = 3600   # also the full scale of the t1 bar
+timer1_duration = 3600   # also the full scale of the t1 meter
 timer2_duration = 900
 bt_device_1 = "AC:BF:71:08:A1:D6"
 audio_device_2 = "EC:81:93:AC:8B:60"   # second output: BT MAC or a unique substring of the sink name (e.g. "HiFi__Speaker__sink")
 weather_lat = 38.81
 weather_lon = -89.95
 weather_max_age = 1800   # seconds before the cached weather is refetched
-alert_sound = "~/.config/widgets/wavedash-alarm.wav"   # played by pw-play when a timer hits zero with the alarm on
+alert_sound = "~/.config/widgets/rail-alarm.wav"   # played by pw-play when a timer hits zero with the alarm on
 alert_volume = 1.0       # 0.0-1.0, linear gain passed to pw-play --volume (also applies to the preview)
 ```
 
-**Color keys:** `background`, `background_opacity`, `foreground` (text, icons; labels and tracks are faded from it), `border` (frame), `divider`, `clock`, `weather`, `volume`, `brightness`, `battery`, `battery_charging`, `battery_low`, `timer`, `accentr` (finished-timer pulse). Other keys the walrs template emits are ignored.
+**Color keys:** `background`, `background_opacity`, `foreground` (text, icons; dimmed text and tracks are faded from it), `divider` (rules), `clock`, `weather`, `volume`, `brightness`, `battery`, `battery_charging`, `battery_low`, `timer`, `accentr` (finished-timer pulse), `color1`-`color6` (palette dots). Other keys the walrs template emits are ignored.
 
 ### grimoire
 
@@ -305,7 +311,6 @@ Scripts in `../scripts/` that use these widgets:
 ## Ideas
 
 - **sysinfo** — neofetch/fastfetch-style system info overlay (host, kernel, CPU, RAM, GPU, uptime, packages, etc). Static snapshot on launch, not live monitoring.
-- **workspaces** — thin edge-anchored bar showing Hyprland workspace state via IPC socket. Active/occupied/empty as colored dots or rectangles.
 - **cliphistory** — clipboard history picker. Reads from cliphist (or similar wl-clipboard history), presents as a filterable list overlay. Same fuzzy-search-and-pick pattern.
 
 ## Future applications
@@ -321,10 +326,10 @@ Larger projects that go beyond simple overlays — closer to full applications, 
 - bug: `load_desktop_entries` dedupe direction is inverted. Comment says "local overrides system", but `desktop_dirs()` yields `~/.local/share/applications` first, so the local entry is inserted into `seen` first and then the system entry overwrites it via `items[idx] = item`. Fix: either reverse `desktop_dirs()` order, or skip when `seen` already contains the filename.
 - doesn't parse `Keywords=` from .desktop files, so e.g. searching "discord" won't match `vesktop.desktop` (which has `Keywords=discord;...`).
 
-### wavedash
+### rail
 - Network tile — wifi SSID + signal strength or ethernet indicator
-- Hover highlight for the battery bar
-- Better layout abstractions — reduce overhead while adding consistency and styling
+- Hover popups with more info and interactivity per item
+- Workspace indicators and window titles
 
 ### wallrun
 - Flag for the launcher to only search over the filename rather than the full path string

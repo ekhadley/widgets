@@ -6,7 +6,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit as sctk;
-use sctk::reexports::calloop::timer::{TimeoutAction, Timer};
 use sctk::reexports::calloop::EventLoop;
 use sctk::reexports::calloop_wayland_source::WaylandSource;
 use sctk::compositor::{CompositorHandler, CompositorState};
@@ -18,7 +17,7 @@ use sctk::seat::pointer::cursor_shape::CursorShapeManager;
 use sctk::seat::{Capability, SeatHandler, SeatState};
 use sctk::reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use sctk::shell::wlr_layer::{
-    KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
 };
 use sctk::shell::WaylandSurface;
@@ -31,7 +30,7 @@ use sctk::{
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, QueueHandle};
-use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 // --- Config ---
 
@@ -39,6 +38,8 @@ use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 #[serde(default)]
 struct Config {
     color_file: Option<String>,
+    height: u32,
+    output: Option<String>,
     font: String,
     font_bold: String,
     timer1_duration: u64,
@@ -55,7 +56,9 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            color_file: Some("~/.cache/wal/colors-wavedash.toml".into()),
+            color_file: Some("~/.cache/wal/colors-rail.toml".into()),
+            height: 32,
+            output: None,
             font: "~/.local/share/fonts/GoogleSansCode-Regular.ttf".into(),
             font_bold: "~/.local/share/fonts/GoogleSansCode-Bold.ttf".into(),
             timer1_duration: 3600,
@@ -65,18 +68,18 @@ impl Default for Config {
             weather_lat: 0.0,
             weather_lon: 0.0,
             weather_max_age: 3600,
-            alert_sound: "~/.config/widgets/wavedash-alarm.wav".into(),
+            alert_sound: "~/.config/widgets/rail-alarm.wav".into(),
             alert_volume: 1.0,
         }
     }
 }
 
 fn load_config() -> Config {
-    let path = config_dir().join("wavedash.toml");
+    let path = config_dir().join("rail.toml");
     match std::fs::read_to_string(&path) {
         Ok(s) => match toml::from_str(&s) {
             Ok(cfg) => cfg,
-            Err(e) => { eprintln!("wavedash: failed to parse {}: {e}", path.display()); Config::default() }
+            Err(e) => { eprintln!("rail: failed to parse {}: {e}", path.display()); Config::default() }
         }
         Err(_) => Config::default(),
     }
@@ -119,6 +122,7 @@ struct Colors {
     battery_charging: [u8; 3],
     battery_low: [u8; 3],
     timer: [u8; 3],
+    palette: [[u8; 3]; 6],  // color1-6, the dots that open tincture
 }
 
 impl Default for Colors {
@@ -138,6 +142,7 @@ impl Default for Colors {
             battery_charging: [0xa6, 0xe3, 0xa1],
             battery_low: [0xf3, 0x8b, 0xa8],
             timer: [0xcb, 0xa6, 0xf7],
+            palette: [[0xf3, 0x8b, 0xa8], [0xa6, 0xe3, 0xa1], [0xf9, 0xe2, 0xaf], [0x89, 0xb4, 0xfa], [0xf5, 0xc2, 0xe7], [0x94, 0xe2, 0xd5]],
         }
     }
 }
@@ -181,6 +186,7 @@ fn load_colors(path: Option<&str>) -> Colors {
                             "battery_charging" => colors.battery_charging = c,
                             "battery_low" => colors.battery_low = c,
                             "timer" => colors.timer = c,
+                            "color1" | "color2" | "color3" | "color4" | "color5" | "color6" => colors.palette[key[5..].parse::<usize>().unwrap() - 1] = c,
                             _ => {}
                         }
                     }
@@ -213,7 +219,7 @@ fn state_path() -> PathBuf {
     let base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    base.join("widgets/wavedash.toml")
+    base.join("widgets/rail.toml")
 }
 
 fn load_state(cfg: &Config) -> State {
@@ -252,7 +258,7 @@ fn format_timer(secs: i64) -> String {
 }
 
 // --- Alarm ---
-// A detached `wavedash --alarm <n> <started>` process watches timer n in the state file and plays
+// A detached `rail --alarm <n> <started>` process watches timer n in the state file and plays
 // the alert sound when it reaches zero. Pausing or restarting the timer changes `started`, which
 // makes the watcher exit, so nothing has to be cancelled explicitly.
 
@@ -262,14 +268,14 @@ fn play_alert(sound: &std::path::Path, volume: f32) -> Child {
 }
 
 fn spawn_alarm(n: u8, started: u64) {
-    Command::new("pkill").args(["-f", &format!("wavedash --alarm {n}")]).status().unwrap();
+    Command::new("pkill").args(["-f", &format!("rail --alarm {n}")]).status().unwrap();
     Command::new(std::env::current_exe().unwrap()).args(["--alarm", &n.to_string(), &started.to_string()])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
 }
 
 fn run_alarm(n: u8, started: u64, cfg: &Config) {
-    // Renamed so the toggle script's `pkill -x wavedash` closes the panel without taking the watcher down
-    unsafe { libc::prctl(libc::PR_SET_NAME, b"wavedash-alarm\0".as_ptr()); }
+    // Renamed so the toggle script's `pkill -x rail` closes the bar without taking the watcher down
+    unsafe { libc::prctl(libc::PR_SET_NAME, b"rail-alarm\0".as_ptr()); }
     let mut player: Option<Child> = None;
     loop {
         let st = load_state(cfg);
@@ -279,8 +285,8 @@ fn run_alarm(n: u8, started: u64, cfg: &Config) {
             if p.try_wait().unwrap().is_some() { return; }
         } else if timer_remaining(t_dur, t_started) <= 0 {
             if !st.alert { return; }
-            if !Command::new("pgrep").args(["-x", "wavedash"]).status().unwrap().success() {
-                Command::new(std::env::current_exe().unwrap()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            if !Command::new("pgrep").args(["-x", "rail"]).status().unwrap().success() {
+                Command::new(std::env::current_exe().unwrap()).arg("--pin").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
             }
             player = Some(play_alert(&expand_path(&cfg.alert_sound), cfg.alert_volume));
         }
@@ -396,32 +402,16 @@ extern "C" fn sigusr2_handler(_: libc::c_int) {
 }
 
 // --- Layout constants ---
-// Sizes are in design px; S scales the whole panel.
+// Sizes are design px for a bar DESIGN_H tall; `Sz` scales them to the configured height.
 
-const S: f32 = 2.0;
-const WIDTH: f32 = 440.0 * S;
-const PAD: f32 = 6.0 * S;          // panel edge to frame
-const LINE: f32 = 1.0 * S;         // frame and divider thickness
-const INSET_X: f32 = 10.0 * S;     // frame to content
-const INSET_Y: f32 = 8.0 * S;
-const ROW_H: f32 = 22.0 * S;
-const DIV_H: f32 = 17.0 * S;       // divider row: space, rule, space
-const LABEL_W: f32 = 48.0 * S;     // icon + label column of level and timer rows
-const VALUE_W: f32 = 92.0 * S;     // value + state word column
-const GAP: f32 = 10.0 * S;
-const ICON: f32 = 14.0 * S;
-const ICON_GAP: f32 = 7.0 * S;     // icon to its label
-const TOGGLE_GAP: f32 = 18.0 * S;
-const BAR_T: f32 = 8.0 * S;        // bar thickness
-const TEXT: f32 = 12.0 * S;
-const CLOCK: f32 = 14.0 * S;
+const DESIGN_H: f32 = 28.0;
 const LINE_HEIGHT: f32 = 1.2;
 
 // Opacities, blended against the background
-const DIM: f32 = 0.6;     // labels and secondary text
+const DIM: f32 = 0.6;     // secondary text, stopped timers
 const OFF: f32 = 0.32;    // off toggles, muted volume
-const TRACK: f32 = 0.14;  // empty part of a bar
-const RULE: f32 = 0.18;   // frame and dividers
+const TRACK: f32 = 0.14;  // empty part of a meter
+const RULE: f32 = 0.18;   // group separators
 
 // Volume
 const VOL_SCROLL_STEP: f32 = 0.05;
@@ -439,14 +429,24 @@ const BRIGHTNESS_MIN: f32 = 0.05;
 const TIMER_SCROLL_STEP: i64 = 60;
 
 // Timing
-const TICK_MS: u64 = 33;
-const AUDIO_REFRESH_MS: u128 = 500;
+const FAST_TICK_MS: u64 = 33;
+const AUDIO_REFRESH_MS: u128 = 2000;
 const AUDIO_REFRESH_COOLDOWN: u64 = 1;
-const LONG_PRESS_GRACE_MS: u64 = 300;
+const LONG_PRESS_GRACE_MS: u128 = 300;
 
-// Header, level rows, two timers and the toggle row, with a divider between each group
-fn panel_height(levels: u32) -> u32 {
-    (2.0 * (PAD + LINE + INSET_Y) + ROW_H * (4 + levels) as f32 + 3.0 * DIV_H).round() as u32
+// Pixel sizes: the design sizes times height / DESIGN_H
+#[derive(Clone, Copy)]
+struct Sz { h: f32, text: f32, clock: f32, icon: f32, meter_w: f32, meter_t: f32, gap: f32, pad: f32, icon_gap: f32, rule_inset: f32, rule_gap: f32, rule_w: f32, dot: f32, dot_gap: f32 }
+
+impl Sz {
+    fn new(height: u32) -> Self {
+        let s = height as f32 / DESIGN_H;
+        Sz {
+            h: height as f32, text: 14.0 * s, clock: 16.0 * s, icon: (17.0 * s).round(), meter_w: 90.0 * s, meter_t: 5.0 * s,
+            gap: 20.0 * s, pad: 16.0 * s, icon_gap: 7.0 * s, rule_inset: 6.0 * s, rule_gap: 14.0 * s, rule_w: s.round().max(1.0),
+            dot: 7.0 * s, dot_gap: 3.0 * s,
+        }
+    }
 }
 
 // --- Geometry ---
@@ -458,34 +458,26 @@ impl Rect {
     fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
-    // The bar of a level or timer row, between the label and value columns
-    fn bar(&self) -> Rect {
-        Rect { x: self.x + LABEL_W + GAP, w: self.w - LABEL_W - VALUE_W - 2.0 * GAP, ..*self }
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Item { Time, Date, Weather, Output, Volume, Brightness, Battery, Alarm, Timer1, Timer2, Notif, Dim, Palette }
+
+// One item of the bar. `meter` is its draggable meter, zero-size if it has none.
+#[derive(Clone, Copy)]
+struct Seg { item: Item, r: Rect, meter: Rect }
+
+struct Layout { segs: Vec<Seg>, rules: Vec<f32>, end: f32 }
+
+impl Layout {
+    // Hit areas reach halfway into the gap on each side, so small icons are easy to hit
+    fn at(&self, x: f32, y: f32, slop: f32) -> Option<Seg> {
+        self.segs.iter().find(|s| Rect { x: s.r.x - slop, w: s.r.w + 2.0 * slop, ..s.r }.contains(x, y)).copied()
+    }
+    fn get(&self, item: Item) -> Seg {
+        *self.segs.iter().find(|s| s.item == item).unwrap()
     }
 }
-
-// Rows and buttons; anything a machine lacks is a zero-size Rect
-struct Layout {
-    dividers: [f32; 3],
-    time: Rect,
-    date: Rect,
-    weather: Rect,
-    volume: Rect,
-    brightness: Rect,
-    battery: Rect,
-    timer1: Rect,
-    timer2: Rect,
-    notif: Rect,
-    alarm: Rect,
-    output: Rect,
-    dim: Rect,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum Hover { None, Date, Volume, Brightness, Timer1, Timer2, Notif, Alarm, Output, Dim }
-
-#[derive(PartialEq, Clone, Copy)]
-enum Drag { Volume, Brightness, Timer1, Timer2 }
 
 // --- App ---
 
@@ -494,12 +486,13 @@ struct App {
     seat_state: SeatState,
     output_state: OutputState,
     shm: Shm,
-    layer: LayerSurface,
+    layer: Option<LayerSurface>,
     pointer: Option<wl_pointer::WlPointer>,
     cursor_shape_manager: CursorShapeManager,
     pool: SlotPool,
     width: u32,
     height: u32,
+    sz: Sz,
     exit: bool,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -525,15 +518,15 @@ struct App {
     audio_device_2: String,
     // Dim toggle (hyprsunset via dim_toggle.sh); only shown when there is no backlight
     is_dim: bool,
-    hover: Hover,
-    drag: Option<Drag>,
-    // Scroll and drag only update these; the tick applies them, at most once per frame
+    hover: Option<Item>,
+    drag: Option<Item>,
+    // Scroll and drag only update these; the tick applies them, at most once per event batch
     volume_dirty: bool,
     brightness_dirty: bool,
     // Base durations for reset (scroll-adjusted)
     timer1_base: i64,
     timer2_base: i64,
-    // Config-defined durations (middle-click reset target, and the scale of the timer bars)
+    // Config-defined durations (middle-click reset target, and the scale of the timer meters)
     timer1_config: i64,
     timer2_config: i64,
     volume_set_at: u64,
@@ -553,9 +546,11 @@ struct App {
     brightness_set_at: u64,
     // Notifications
     notif_paused: bool,
-    // Long press: None = undecided (grace period), Some(true) = exit on key release, Some(false) = persistent
+    // Long press: None = undecided (grace period), Some(true) = peek (exit on key release), Some(false) = persistent
     long_press: Option<bool>,
     startup: Instant,
+    // frame_key() of the last drawn frame
+    shown: String,
 }
 
 impl App {
@@ -574,6 +569,10 @@ impl App {
             weather_fetched: self.weather_fetched,
             alert: self.alert,
         }
+    }
+
+    fn layer(&self) -> &LayerSurface {
+        self.layer.as_ref().unwrap()
     }
 
     fn refresh_audio(&mut self) {
@@ -607,8 +606,15 @@ impl App {
         save_state(&self.state());
     }
 
-    fn output_label(&self) -> &'static str {
-        if self.headphones { "headphones" } else { "speakers" }
+    // (remaining, started, config duration) of a timer item
+    fn timer(&self, item: Item) -> (i64, u64, i64) {
+        if item == Item::Timer1 { (timer_remaining(self.timer1_duration, self.timer1_started), self.timer1_started, self.timer1_config) }
+        else { (timer_remaining(self.timer2_duration, self.timer2_started), self.timer2_started, self.timer2_config) }
+    }
+
+    // A timer that ran out and hasn't been clicked yet; it pulses, so the bar redraws at the fast tick
+    fn finished(&self) -> bool {
+        [Item::Timer1, Item::Timer2].into_iter().any(|t| { let (rem, started, _) = self.timer(t); started > 0 && rem <= 0 })
     }
 
     // ("54° clear", "feels 51°"), or None before the first fetch
@@ -618,71 +624,89 @@ impl App {
         Some((format!("{:.0}° {word}", self.weather_temp), format!("feels {:.0}°", self.weather_feels)))
     }
 
-    fn layout(&self) -> Layout {
-        let x = PAD + LINE + INSET_X;
-        let w = self.width as f32 - 2.0 * x;
-        let row = |y: f32| Rect { x, y, w, h: ROW_H };
-        let text_w = |s: &str| s.chars().count() as f32 * self.cw;
-        let rule = |y: f32| y + (DIV_H - LINE) / 2.0;
-
-        // Header: time, date and weather spread evenly across the row
-        let mut y = PAD + LINE + INSET_Y;
-        let time_w = clock_text().chars().count() as f32 * self.clock_cw;
-        let date_w = ICON + ICON_GAP + text_w(&format_date());
-        let weather_w = self.weather_text().map_or(0.0, |(a, b)| ICON + ICON_GAP + text_w(&a) + GAP + text_w(&b));
-        let gap = (w - time_w - date_w - weather_w) / if weather_w > 0.0 { 2.0 } else { 1.0 };
-        let time = Rect { x, y, w: time_w, h: ROW_H };
-        let date = Rect { x: x + time_w + gap, y, w: date_w, h: ROW_H };
-        let weather = Rect { x: x + w - weather_w, y, w: weather_w, h: ROW_H };
-        y += ROW_H;
-        let d0 = rule(y);
-        y += DIV_H;
-
-        let volume = row(y);
-        y += ROW_H;
-        let brightness = if self.brightness.is_some() { y += ROW_H; row(y - ROW_H) } else { Rect::default() };
-        let battery = if self.battery.is_some() { y += ROW_H; row(y - ROW_H) } else { Rect::default() };
-        let d1 = rule(y);
-        y += DIV_H;
-
-        let timer1 = row(y);
-        let timer2 = row(y + ROW_H);
-        y += 2.0 * ROW_H;
-        let d2 = rule(y);
-        y += DIV_H;
-
-        // Toggles, left to right
-        let mut tx = x;
-        let mut toggle = |label: &str| {
-            let r = Rect { x: tx, y, w: ICON + ICON_GAP + text_w(label), h: ROW_H };
-            tx += r.w + TOGGLE_GAP;
-            r
-        };
-        let notif = toggle("notif");
-        let alarm = toggle("alarm");
-        let output = toggle(self.output_label());
-        let dim = if self.brightness.is_none() { toggle("dim") } else { Rect::default() };
-
-        Layout { dividers: [d0, d1, d2], time, date, weather, volume, brightness, battery, timer1, timer2, notif, alarm, output, dim }
+    // Everything the bar shows apart from hover and the pulse; the tick redraws when it changes
+    fn frame_key(&self) -> String {
+        format!("{} {} {:?} {:?} {} {} {} {:?} {:?} {:?} {} {} {}", clock_text(), format_date(), self.timer(Item::Timer1), self.timer(Item::Timer2),
+            self.volume, self.muted, self.headphones, self.brightness, self.battery, self.weather_text(), self.alert, self.notif_paused, self.width)
     }
 
-    fn hover_at(&self, x: f32, y: f32) -> Hover {
-        let l = self.layout();
-        [(l.date, Hover::Date), (l.volume, Hover::Volume), (l.brightness, Hover::Brightness), (l.timer1, Hover::Timer1),
-         (l.timer2, Hover::Timer2), (l.notif, Hover::Notif), (l.alarm, Hover::Alarm), (l.output, Hover::Output), (l.dim, Hover::Dim)]
-            .into_iter().find(|(r, _)| r.contains(x, y)).map_or(Hover::None, |(_, h)| h)
+    // Left block: time | date | weather | audio and levels. Right block: | alarm and timers | toggles | palette
+    fn groups(&self) -> (Vec<Vec<Item>>, Vec<Vec<Item>>) {
+        let mut left = vec![vec![Item::Time], vec![Item::Date]];
+        if self.weather_fetched > 0 { left.push(vec![Item::Weather]); }
+        let mut audio = vec![Item::Output, Item::Volume];
+        if self.brightness.is_some() { audio.push(Item::Brightness); }
+        if self.battery.is_some() { audio.push(Item::Battery); }
+        left.push(audio);
+        let toggles = if self.brightness.is_none() { vec![Item::Notif, Item::Dim] } else { vec![Item::Notif] };
+        (left, vec![vec![Item::Alarm, Item::Timer1, Item::Timer2], toggles, vec![Item::Palette]])
+    }
+
+    fn item_w(&self, item: Item) -> f32 {
+        let z = self.sz;
+        let text = |n: usize| n as f32 * self.cw;
+        let metered = |n: usize| z.icon + 2.0 * z.icon_gap + z.meter_w + text(n);
+        match item {
+            Item::Time => clock_text().chars().count() as f32 * self.clock_cw,
+            Item::Date => z.icon + z.icon_gap + text(format_date().chars().count()),
+            Item::Weather => { let (a, b) = self.weather_text().unwrap(); z.icon + z.icon_gap + text(a.chars().count() + 1 + b.chars().count()) }
+            Item::Volume | Item::Brightness => metered(4),
+            Item::Timer1 | Item::Timer2 => metered(5),
+            Item::Battery => z.icon + z.icon_gap + text(4),
+            Item::Output | Item::Alarm | Item::Notif | Item::Dim => z.icon,
+            Item::Palette => 6.0 * z.dot + 5.0 * z.dot_gap,
+        }
+    }
+
+    // Places groups left to right from x with a rule between groups (and before the first if `lead_rule`); returns the end x
+    fn place(&self, lay: &mut Layout, groups: &[Vec<Item>], mut x: f32, lead_rule: bool) -> f32 {
+        let z = self.sz;
+        for (i, group) in groups.iter().enumerate() {
+            if i > 0 || lead_rule {
+                if i > 0 { x += z.gap + z.rule_gap; }
+                lay.rules.push(x);
+                x += z.rule_w + z.rule_gap + z.gap;
+            }
+            for (j, &item) in group.iter().enumerate() {
+                if j > 0 { x += z.gap; }
+                let r = Rect { x, y: 0.0, w: self.item_w(item), h: z.h };
+                let metered = matches!(item, Item::Volume | Item::Brightness | Item::Timer1 | Item::Timer2);
+                let meter = if metered { Rect { x: x + z.icon + z.icon_gap, w: z.meter_w, ..r } } else { Rect::default() };
+                lay.segs.push(Seg { item, r, meter });
+                x += r.w;
+            }
+        }
+        x
+    }
+
+    // The left block from the left edge, the right block flush against the right edge
+    fn layout(&self) -> Layout {
+        let (left, right) = self.groups();
+        let mut lay = Layout { segs: vec![], rules: vec![], end: 0.0 };
+        lay.end = self.place(&mut lay, &left, self.sz.pad, false);
+        let mut tail = Layout { segs: vec![], rules: vec![], end: 0.0 };
+        let dx = self.width as f32 - self.sz.pad - self.place(&mut tail, &right, 0.0, true);
+        let shift = |r: Rect| if r.w > 0.0 { Rect { x: r.x + dx, ..r } } else { r };
+        lay.segs.extend(tail.segs.iter().map(|s| Seg { r: shift(s.r), meter: shift(s.meter), ..*s }));
+        lay.rules.extend(tail.rules.iter().map(|x| x + dx));
+        lay.end += self.width as f32 - dx; // total content width, for the overflow check
+        lay
+    }
+
+    fn item_at(&self, x: f32, y: f32) -> Option<Item> {
+        self.layout().at(x, y, self.sz.gap / 2.0).map(|s| s.item)
     }
 
     fn draw(&mut self) {
         let lay = self.layout();
+        self.shown = self.frame_key();
         let c = self.colors;
+        let z = self.sz;
         let hv = self.hover;
         let (w, h) = (self.width, self.height);
-        let clock = clock_text();
-        let date = format_date();
-        let weather = self.weather_text();
         let pulse_t = self.startup.elapsed().as_secs_f32();
-        let output = self.output_label();
+        let weather = self.weather_text();
+        let timers = [self.timer(Item::Timer1), self.timer(Item::Timer2)];
 
         let (wl_buf, canvas) = self.pool
             .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
@@ -692,69 +716,69 @@ impl App {
 
         let fg = c.foreground;
         let (dim, off) = (fade(fg, c.background, DIM), fade(fg, c.background, OFF));
-        let label = |which: Hover| if hv == which { fg } else { dim };
         let ic = &self.icons;
         let mut p = Painter {
-            pm: &mut pixmap, fs: &mut self.font_system, sc: &mut self.swash_cache, family: &self.font_family, cw: self.cw,
-            fg, dim, off, track: fade(fg, c.background, TRACK),
+            pm: &mut pixmap, fs: &mut self.font_system, sc: &mut self.swash_cache, family: &self.font_family,
+            h: z.h, meter_t: z.meter_t, track: fade(fg, c.background, TRACK),
         };
 
-        // Frame and dividers
-        let (fw, fh) = (w as f32 - 2.0 * PAD, h as f32 - 2.0 * PAD);
-        let border = fade(c.border, c.background, RULE);
-        p.fill(PAD, PAD, fw, LINE, border);
-        p.fill(PAD, PAD + fh - LINE, fw, LINE, border);
-        p.fill(PAD, PAD, LINE, fh, border);
-        p.fill(PAD + fw - LINE, PAD, LINE, fh, border);
-        for y in lay.dividers { p.fill(PAD + LINE, y, fw - 2.0 * LINE, LINE, fade(c.divider, c.background, RULE)); }
+        for x in &lay.rules { p.fill(x.round(), z.rule_inset, z.rule_w, z.h - 2.0 * z.rule_inset, fade(c.divider, c.background, RULE)); }
 
-        // Header
-        p.text(&clock, lay.time.x, lay.time.y, CLOCK, Weight::BOLD, c.clock);
-        let date_c = label(Hover::Date);
-        p.icon(&ic.cal, lay.date.x, lay.date.y, date_c);
-        p.text(&date, lay.date.x + ICON + ICON_GAP, lay.date.y, TEXT, Weight::NORMAL, date_c);
-        if let Some((now, feels)) = &weather {
-            let x = lay.weather.x + ICON + ICON_GAP;
-            p.icon(&ic.weather[weather_kind(self.weather_code, self.weather_is_day).0], lay.weather.x, lay.weather.y, c.weather);
-            p.text(now, x, lay.weather.y, TEXT, Weight::NORMAL, c.weather);
-            p.text(feels, x + now.chars().count() as f32 * self.cw + GAP, lay.weather.y, TEXT, Weight::NORMAL, dim);
-        }
-
-        // Levels
-        let vol = format!("{:.0}%", self.volume * 100.0);
-        if self.muted {
-            p.row(&lay.volume, &ic.vol_off, "vol", off, self.volume / VOL_MAX, fade(c.volume, c.background, OFF), &vol, off, "muted");
-        } else {
-            p.row(&lay.volume, &ic.vol, "vol", label(Hover::Volume), self.volume / VOL_MAX, c.volume, &vol, hover_color(fg, hv == Hover::Volume), "");
-        }
-        if let Some(b) = self.brightness {
-            p.row(&lay.brightness, &ic.bri, "bri", label(Hover::Brightness), b, c.brightness, &format!("{:.0}%", b * 100.0), hover_color(fg, hv == Hover::Brightness), "");
-        }
-        if let Some((pct, plugged)) = self.battery {
-            let low = !plugged && pct <= BATTERY_LOW;
-            let bar_c = if plugged { c.battery_charging } else if low { c.battery_low } else { c.battery };
-            p.row(&lay.battery, &ic.bat, "bat", dim, pct, bar_c, &format!("{:.0}%", pct * 100.0), fg, if plugged { "charging" } else if low { "low" } else { "" });
-            p.icon(&battery_fill(ic.n, pct, plugged.then_some(&ic.bolt[..])), lay.battery.x, lay.battery.y, bar_c);
-        }
-
-        // Timers: the bar is the remaining time on the scale of the config duration
-        for (r, dur, started, config, which, name) in [
-            (lay.timer1, self.timer1_duration, self.timer1_started, self.timer1_config, Hover::Timer1, "t1"),
-            (lay.timer2, self.timer2_duration, self.timer2_started, self.timer2_config, Hover::Timer2, "t2"),
-        ] {
-            let rem = timer_remaining(dur, started);
-            // Padded to the longest word so the value doesn't move when the state changes
-            let state = format!("{:<7}", if started == 0 { "paused" } else if rem <= 0 { "done" } else { "running" });
-            let value_c = timer_color(&c, pulse_t, rem, started, hv == which);
-            p.row(&r, &ic.timer, name, label(which), rem as f32 / config as f32, c.timer, &format_timer(rem), value_c, &state);
-        }
-
-        // Toggles
-        p.toggle(&lay.notif, if self.notif_paused { &ic.bell_off } else { &ic.bell }, "notif", !self.notif_paused, hv == Hover::Notif);
-        p.toggle(&lay.alarm, if self.alert { &ic.alarm } else { &ic.alarm_off }, "alarm", self.alert, hv == Hover::Alarm);
-        p.toggle(&lay.output, if self.headphones { &ic.phones } else { &ic.speaker }, output, true, hv == Hover::Output);
-        if self.brightness.is_none() {
-            p.toggle(&lay.dim, if self.weather_is_day { &ic.bri } else { &ic.moon }, "dim", true, hv == Hover::Dim);
+        for s in &lay.segs {
+            let lit = |col: [u8; 3]| hover_color(col, hv == Some(s.item));
+            let toggle = |on: bool| lit(if on { fg } else { off });
+            let x = s.r.x;
+            let after_icon = x + z.icon + z.icon_gap;
+            let after_meter = s.meter.x + s.meter.w + z.icon_gap;
+            match s.item {
+                Item::Time => p.text(&clock_text(), x, z.clock, Weight::BOLD, c.clock),
+                Item::Date => {
+                    p.icon(&ic.cal, x, lit(fg));
+                    p.text(&format_date(), after_icon, z.text, Weight::NORMAL, lit(fg));
+                }
+                Item::Weather => {
+                    let (now, feels) = weather.as_ref().unwrap();
+                    p.icon(&ic.weather[weather_kind(self.weather_code, self.weather_is_day).0], x, c.weather);
+                    p.text(now, after_icon, z.text, Weight::NORMAL, c.weather);
+                    p.text(feels, after_icon + (now.chars().count() + 1) as f32 * self.cw, z.text, Weight::NORMAL, dim);
+                }
+                Item::Output => p.icon(if self.headphones { &ic.phones } else { &ic.speaker }, x, lit(fg)),
+                Item::Volume => {
+                    let (icon, col, bar) = if self.muted { (&ic.vol_off, off, fade(c.volume, c.background, OFF)) } else { (&ic.vol, fg, c.volume) };
+                    p.icon(icon, x, lit(col));
+                    p.meter(&s.meter, self.volume / VOL_MAX, bar);
+                    p.text(&format!("{:.0}%", self.volume * 100.0), after_meter, z.text, Weight::NORMAL, lit(col));
+                }
+                Item::Brightness => {
+                    let b = self.brightness.unwrap();
+                    p.icon(&ic.bri, x, lit(fg));
+                    p.meter(&s.meter, b, c.brightness);
+                    p.text(&format!("{:.0}%", b * 100.0), after_meter, z.text, Weight::NORMAL, lit(fg));
+                }
+                Item::Battery => {
+                    let (pct, plugged) = self.battery.unwrap();
+                    let low = !plugged && pct <= BATTERY_LOW;
+                    let fill_c = if plugged { c.battery_charging } else if low { c.battery_low } else { c.battery };
+                    p.icon(&ic.bat, x, fg);
+                    p.icon(&battery_fill(ic.n, pct, plugged.then_some(&ic.bolt[..])), x, fill_c);
+                    p.text(&format!("{:.0}%", pct * 100.0), after_icon, z.text, Weight::NORMAL, fg);
+                }
+                Item::Alarm => p.icon(if self.alert { &ic.alarm } else { &ic.alarm_off }, x, toggle(self.alert)),
+                // Running: full color. Stopped: dimmed. Finished: the time pulses until clicked.
+                Item::Timer1 | Item::Timer2 => {
+                    let (rem, started, config) = timers[(s.item == Item::Timer2) as usize];
+                    let col = lit(if started > 0 { fg } else { dim });
+                    let text_c = if started > 0 && rem <= 0 { pulse(&c, pulse_t) } else { col };
+                    p.icon(&ic.timer, x, col);
+                    p.meter(&s.meter, rem as f32 / config as f32, if started > 0 { c.timer } else { fade(c.timer, c.background, DIM) });
+                    p.text(&format_timer(rem), after_meter, z.text, Weight::NORMAL, lit(text_c));
+                }
+                Item::Notif => p.icon(if self.notif_paused { &ic.bell_off } else { &ic.bell }, x, toggle(!self.notif_paused)),
+                Item::Dim => p.icon(if self.weather_is_day { &ic.bri } else { &ic.moon }, x, lit(fg)),
+                Item::Palette => for (i, &col) in c.palette.iter().enumerate() {
+                    p.dot(x + i as f32 * (z.dot + z.dot_gap) + z.dot / 2.0, z.dot / 2.0, lit(col));
+                }
+            }
         }
 
         // Copy RGBA premul -> BGRA (ARGB8888 on LE)
@@ -765,41 +789,35 @@ impl App {
             dst[3] = src[3];
         }
 
-        wl_buf.attach_to(self.layer.wl_surface()).unwrap();
-        self.layer.wl_surface().damage_buffer(0, 0, w as i32, h as i32);
-        self.layer.wl_surface().commit();
+        let surface = self.layer().wl_surface();
+        wl_buf.attach_to(surface).unwrap();
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        surface.commit();
     }
 
     fn handle_click(&mut self, x: f32, y: f32) {
-        let lay = self.layout();
-        let target = self.hover_at(x, y);
-        // A press on a bar starts a drag; the rest of the row is a button
-        self.drag = match target {
-            Hover::Volume if lay.volume.bar().contains(x, y) => Some(Drag::Volume),
-            Hover::Brightness if lay.brightness.bar().contains(x, y) => Some(Drag::Brightness),
-            Hover::Timer1 if lay.timer1.bar().contains(x, y) => Some(Drag::Timer1),
-            Hover::Timer2 if lay.timer2.bar().contains(x, y) => Some(Drag::Timer2),
-            _ => None,
-        };
-        if self.drag.is_some() {
+        let Some(seg) = self.layout().at(x, y, self.sz.gap / 2.0) else { return };
+        // A press on a meter starts a drag; the rest of the item is a button
+        if seg.meter.contains(x, y) {
+            self.drag = Some(seg.item);
             self.drag_to(x);
             return;
         }
-        match target {
-            Hover::Volume => {
+        match seg.item {
+            Item::Volume => {
                 toggle_mute();
                 self.refresh_audio();
             }
-            Hover::Timer1 => self.click_timer(1),
-            Hover::Timer2 => self.click_timer(2),
-            Hover::Date => {
+            Item::Timer1 => self.click_timer(1),
+            Item::Timer2 => self.click_timer(2),
+            Item::Date => {
                 Command::new("xdg-open").arg("https://calendar.google.com").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
             }
-            Hover::Notif => {
+            Item::Notif => {
                 Command::new("dunstctl").arg("set-paused").arg("toggle").spawn().ok();
                 self.notif_paused = !self.notif_paused;
             }
-            Hover::Alarm => {
+            Item::Alarm => {
                 self.alert = !self.alert;
                 save_state(&self.state());
                 if self.alert {
@@ -809,39 +827,43 @@ impl App {
                     Command::new("pkill").args(["-f", &format!("pw-play .*{}", self.alert_sound.display())]).status().unwrap();
                 }
             }
-            Hover::Output => {
+            Item::Output => {
                 self.refresh_audio();
                 let target = if self.headphones { &self.audio_device_2 } else { &self.bt_device_1 };
                 switch_audio(target);
                 self.refresh_audio();
             }
-            Hover::Dim => {
+            Item::Dim => {
                 let arg = if self.is_dim { "1" } else { "0" };
                 Command::new("sh").arg("-c").arg(format!("{}/wgmn/scripts/dim_toggle.sh {arg}", home().display())).spawn().ok();
                 self.is_dim = !self.is_dim;
             }
-            Hover::Brightness | Hover::None => {}
+            // Tincture with no argument edits the current wallpaper's scheme
+            Item::Palette => {
+                Command::new("tincture").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            }
+            Item::Time | Item::Weather | Item::Brightness | Item::Battery => {}
         }
         self.draw();
     }
 
     // Set the dragged value from the pointer's x; timers snap to whole minutes
     fn drag_to(&mut self, x: f32) {
-        let lay = self.layout();
         let Some(drag) = self.drag else { return };
-        let bar = match drag { Drag::Volume => lay.volume, Drag::Brightness => lay.brightness, Drag::Timer1 => lay.timer1, Drag::Timer2 => lay.timer2 }.bar();
-        let frac = ((x - bar.x - BAR_T / 2.0) / (bar.w - BAR_T)).clamp(0.0, 1.0);
+        let bar = self.layout().get(drag).meter;
+        let t = self.sz.meter_t;
+        let frac = ((x - bar.x - t / 2.0) / (bar.w - t)).clamp(0.0, 1.0);
         match drag {
-            Drag::Volume => {
+            Item::Volume => {
                 self.volume = frac * VOL_MAX;
                 self.volume_dirty = true;
             }
-            Drag::Brightness => {
+            Item::Brightness => {
                 self.brightness = Some(frac.max(BRIGHTNESS_MIN));
                 self.brightness_dirty = true;
             }
-            Drag::Timer1 | Drag::Timer2 => {
-                let (dur, started, base, config) = if drag == Drag::Timer1 { (&mut self.timer1_duration, self.timer1_started, &mut self.timer1_base, self.timer1_config) } else { (&mut self.timer2_duration, self.timer2_started, &mut self.timer2_base, self.timer2_config) };
+            _ => {
+                let (dur, started, base, config) = if drag == Item::Timer1 { (&mut self.timer1_duration, self.timer1_started, &mut self.timer1_base, self.timer1_config) } else { (&mut self.timer2_duration, self.timer2_started, &mut self.timer2_base, self.timer2_config) };
                 let secs = ((frac * config as f32 / 60.0).round() as i64 * 60).max(TIMER_SCROLL_STEP);
                 // A paused timer gets a new base; a running one keeps running from the new time
                 if started == 0 {
@@ -856,24 +878,24 @@ impl App {
     }
 
     fn end_drag(&mut self) {
-        if matches!(self.drag, Some(Drag::Timer1 | Drag::Timer2)) { save_state(&self.state()); }
+        if matches!(self.drag, Some(Item::Timer1 | Item::Timer2)) { save_state(&self.state()); }
         self.drag = None;
     }
 
     fn handle_scroll(&mut self, x: f32, y: f32, dy: f64) {
         let sign = if dy > 0.0 { -1.0 } else { 1.0 };
-        match self.hover_at(x, y) {
-            Hover::Volume => {
+        match self.item_at(x, y) {
+            Some(Item::Volume) => {
                 self.volume = (self.volume + sign * VOL_SCROLL_STEP).clamp(0.0, VOL_MAX);
                 self.volume_dirty = true;
             }
-            Hover::Brightness => {
+            Some(Item::Brightness) => {
                 let Some(b) = self.brightness else { return };
                 self.brightness = Some((b + sign * BRIGHTNESS_SCROLL_STEP).clamp(BRIGHTNESS_MIN, 1.0));
                 self.brightness_dirty = true;
             }
-            which @ (Hover::Timer1 | Hover::Timer2) => {
-                let (dur, base) = if which == Hover::Timer1 { (&mut self.timer1_duration, &mut self.timer1_base) } else { (&mut self.timer2_duration, &mut self.timer2_base) };
+            Some(which @ (Item::Timer1 | Item::Timer2)) => {
+                let (dur, base) = if which == Item::Timer1 { (&mut self.timer1_duration, &mut self.timer1_base) } else { (&mut self.timer2_duration, &mut self.timer2_base) };
                 *dur = (*dur + sign as i64 * TIMER_SCROLL_STEP).max(TIMER_SCROLL_STEP);
                 *base = *dur;
                 save_state(&self.state());
@@ -884,24 +906,96 @@ impl App {
     }
 
     fn handle_middle_click(&mut self, x: f32, y: f32) {
-        match self.hover_at(x, y) {
-            Hover::Volume | Hover::Output => {
+        match self.item_at(x, y) {
+            Some(Item::Volume | Item::Output) => {
                 Command::new("pavucontrol").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
             }
-            Hover::Timer1 => self.reset_timer(1, true),
-            Hover::Timer2 => self.reset_timer(2, true),
+            Some(Item::Timer1) => self.reset_timer(1, true),
+            Some(Item::Timer2) => self.reset_timer(2, true),
             _ => return,
         }
         self.draw();
     }
 
     fn handle_right_click(&mut self, x: f32, y: f32) {
-        match self.hover_at(x, y) {
-            Hover::Timer1 => self.reset_timer(1, false),
-            Hover::Timer2 => self.reset_timer(2, false),
+        match self.item_at(x, y) {
+            Some(Item::Timer1) => self.reset_timer(1, false),
+            Some(Item::Timer2) => self.reset_timer(2, false),
             _ => return,
         }
         self.draw();
+    }
+
+    // Runs after every event batch and on the timeout from next_timeout()
+    fn tick(&mut self) {
+        // Long press: after the grace period, a key still held means peek (exit on release); a quick tap pins the bar
+        if self.long_press.is_none() && self.startup.elapsed().as_millis() >= LONG_PRESS_GRACE_MS {
+            self.long_press = Some(!GOT_SIGUSR2.load(Ordering::Acquire));
+            if self.long_press == Some(false) { self.reserve(); }
+        }
+        if self.long_press == Some(true) && GOT_SIGUSR2.load(Ordering::Acquire) {
+            self.exit = true;
+            return;
+        }
+        if self.volume_dirty {
+            set_volume(self.volume);
+            self.volume_dirty = false;
+            self.volume_set_at = now_unix();
+        }
+        if self.brightness_dirty {
+            set_brightness(self.brightness.unwrap());
+            self.brightness_dirty = false;
+            self.brightness_set_at = now_unix();
+        }
+        // Volume and backlight can change from outside (hotkeys); poll them unless we just set them
+        if self.drag.is_none() && self.audio_refreshed.elapsed().as_millis() >= AUDIO_REFRESH_MS {
+            if now_unix() - self.volume_set_at >= AUDIO_REFRESH_COOLDOWN { self.refresh_audio(); }
+            if self.brightness.is_some() && now_unix() - self.brightness_set_at >= AUDIO_REFRESH_COOLDOWN { self.brightness = read_brightness(); }
+            self.audio_refreshed = Instant::now();
+        }
+        if now_unix() - self.battery_read_at >= BATTERY_REFRESH {
+            self.battery = read_battery();
+            self.battery_read_at = now_unix();
+        }
+        if self.weather_fetch.as_mut().is_some_and(|child| child.try_wait().unwrap().is_some()) {
+            self.read_weather();
+        }
+        if self.width > 0 && (self.finished() || self.frame_key() != self.shown) { self.draw(); }
+    }
+
+    // Fast while something animates or waits on input; otherwise at the next whole second, when the timers tick
+    fn next_timeout(&self) -> std::time::Duration {
+        if self.drag.is_some() || self.long_press != Some(false) || self.finished() || self.weather_fetch.is_some() {
+            return std::time::Duration::from_millis(FAST_TICK_MS);
+        }
+        let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_millis() as u64;
+        std::time::Duration::from_millis(1000 - ms + 5)
+    }
+
+    // Pinned: push windows down by the bar's height
+    fn reserve(&self) {
+        self.layer().set_exclusive_zone(self.height as i32);
+        self.layer().commit();
+    }
+
+    fn read_weather(&mut self) {
+        let output = self.weather_fetch.take().unwrap().wait_with_output().unwrap();
+        if !output.status.success() { return; }
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Scope to "current":{ to skip "current_units"
+        let Some(ci) = text.find("\"current\":{") else { return };
+        let s = &text[ci..];
+        let num_at = |needle: &str| -> Option<f64> {
+            let after = s[s.find(needle)? + needle.len()..].trim_start();
+            after[..after.find(|c: char| c == ',' || c == '}')?].trim().parse().ok()
+        };
+        let (Some(temp), Some(feels), Some(code), Some(is_day)) = (num_at("\"temperature_2m\":"), num_at("\"apparent_temperature\":"), num_at("\"weather_code\":"), num_at("\"is_day\":")) else { return };
+        self.weather_temp = temp;
+        self.weather_feels = feels;
+        self.weather_code = code as u32;
+        self.weather_is_day = is_day as u32 == 1;
+        self.weather_fetched = now_unix();
+        save_state(&self.state());
     }
 }
 
@@ -922,14 +1016,14 @@ fn clock_text() -> String {
     format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "am" } else { "pm" })
 }
 
-// "Sun, Nov 1"
+// "Sunday, November 1"
 fn format_date() -> String {
     let secs = now_unix();
     let t = secs as i64;
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
     unsafe { libc::localtime_r(&t as *const i64, &mut tm) };
-    let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     format!("{}, {} {}", days[tm.tm_wday as usize], months[tm.tm_mon as usize], tm.tm_mday)
 }
 
@@ -947,13 +1041,9 @@ fn hover_color(c: [u8; 3], hovered: bool) -> [u8; 3] {
     [b(c[0] as f32), b(c[1] as f32), b(c[2] as f32)]
 }
 
-// `t` is seconds since launch; a finished timer breathes in the accent color until acknowledged
-fn timer_color(c: &Colors, t: f32, rem: i64, started: u64, hovered: bool) -> [u8; 3] {
-    if started > 0 && rem <= 0 {
-        let pulse = 0.5 + 0.5 * (t * std::f32::consts::PI).sin();
-        return fade(hover_color(c.accentr, hovered), c.background, 0.5 + 0.5 * pulse);
-    }
-    fade(hover_color(c.timer, hovered), c.background, if started > 0 { 1.0 } else { DIM })
+// `t` is seconds since launch; a finished timer's time breathes in the accent color until clicked
+fn pulse(c: &Colors, t: f32) -> [u8; 3] {
+    fade(c.accentr, c.background, 0.75 + 0.25 * (t * std::f32::consts::PI).sin())
 }
 
 fn fill_rect(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h: u32, c: [u8; 3]) {
@@ -981,16 +1071,14 @@ fn fill_rect_alpha(data: &mut [u8], pw: u32, ph: u32, x: u32, y: u32, w: u32, h:
     }
 }
 
-// Draws into the panel pixmap. Text, icons and bars are positioned by the top of their row and centered in it.
+// Draws into the bar pixmap. Text, icons, meters and dots are centered vertically in the bar.
 struct Painter<'a> {
     pm: &'a mut Pixmap,
     fs: &'a mut FontSystem,
     sc: &'a mut SwashCache,
     family: &'a str,
-    cw: f32,
-    fg: [u8; 3],
-    dim: [u8; 3],
-    off: [u8; 3],
+    h: f32,
+    meter_t: f32,
     track: [u8; 3],
 }
 
@@ -1000,22 +1088,22 @@ impl Painter<'_> {
         fill_rect(self.pm.data_mut(), pw, ph, x as u32, y as u32, w as u32, h as u32, c);
     }
 
-    fn text(&mut self, s: &str, x: f32, row_y: f32, size: f32, weight: Weight, c: [u8; 3]) {
-        let y = row_y + (ROW_H - size * LINE_HEIGHT) / 2.0;
-        render_text(self.pm, self.fs, self.sc, s, x, y, size, 1000.0, ROW_H, c, self.family, weight);
+    fn text(&mut self, s: &str, x: f32, size: f32, weight: Weight, c: [u8; 3]) {
+        let y = (self.h - size * LINE_HEIGHT) / 2.0;
+        render_text(self.pm, self.fs, self.sc, s, x, y, size, 10000.0, self.h, c, self.family, weight);
     }
 
-    fn icon(&mut self, mask: &[u8], x: f32, row_y: f32, c: [u8; 3]) {
+    fn icon(&mut self, mask: &[u8], x: f32, c: [u8; 3]) {
         let n = (mask.len() as f32).sqrt() as i32;
         let (pw, ph) = (self.pm.width() as i32, self.pm.height() as i32);
-        let y = (row_y + (ROW_H - n as f32) / 2.0).round() as i32;
+        let y = ((self.h - n as f32) / 2.0).round() as i32;
         blit_mask(self.pm.data_mut(), pw, ph, x.round() as i32, y, n, n, mask, &c);
     }
 
     // Round-capped track with the filled part on top
-    fn bar(&mut self, r: &Rect, frac: f32, c: [u8; 3]) {
-        let y = r.y + r.h / 2.0;
-        let (x0, x1) = (r.x + BAR_T / 2.0, r.x + r.w - BAR_T / 2.0);
+    fn meter(&mut self, r: &Rect, frac: f32, c: [u8; 3]) {
+        let y = self.h / 2.0;
+        let (x0, x1) = (r.x + self.meter_t / 2.0, r.x + r.w - self.meter_t / 2.0);
         self.stroke(x0, x1, y, self.track);
         if frac > 0.0 { self.stroke(x0, x0 + frac.min(1.0) * (x1 - x0), y, c); }
     }
@@ -1024,34 +1112,20 @@ impl Painter<'_> {
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y);
         pb.line_to(x1, y);
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(c[0], c[1], c[2], 255);
-        let stroke = Stroke { width: BAR_T, line_cap: LineCap::Round, ..Stroke::default() };
-        self.pm.stroke_path(&pb.finish().unwrap(), &paint, &stroke, Transform::identity(), None);
+        let stroke = Stroke { width: self.meter_t, line_cap: LineCap::Round, ..Stroke::default() };
+        self.pm.stroke_path(&pb.finish().unwrap(), &paint(c), &stroke, Transform::identity(), None);
     }
 
-    // A level or timer row: icon and label, bar, then the value and state word flush right
-    fn row(&mut self, r: &Rect, icon: &[u8], label: &str, label_c: [u8; 3], frac: f32, bar_c: [u8; 3], value: &str, value_c: [u8; 3], state: &str) {
-        self.icon(icon, r.x, r.y, label_c);
-        self.text(label, r.x + ICON + ICON_GAP, r.y, TEXT, Weight::NORMAL, label_c);
-        self.bar(&r.bar(), frac, bar_c);
-        let right = r.x + r.w;
-        let state_w = state.chars().count() as f32 * self.cw;
-        let value_x = right - state_w - if state.is_empty() { 0.0 } else { GAP } - value.chars().count() as f32 * self.cw;
-        self.text(value, value_x, r.y, TEXT, Weight::NORMAL, value_c);
-        self.text(state, right - state_w, r.y, TEXT, Weight::NORMAL, self.dim);
+    fn dot(&mut self, cx: f32, r: f32, c: [u8; 3]) {
+        let path = PathBuilder::from_circle(cx, self.h / 2.0, r).unwrap();
+        self.pm.fill_path(&path, &paint(c), FillRule::Winding, Transform::identity(), None);
     }
+}
 
-    // Off toggles are dimmed (their icon is the slashed variant)
-    fn toggle(&mut self, r: &Rect, icon: &[u8], label: &str, on: bool, hovered: bool) {
-        let (icon_c, label_c) = match (on, hovered) {
-            (true, false) => (self.fg, self.dim),
-            (true, true) => (self.fg, self.fg),
-            (false, h) => (hover_color(self.off, h), hover_color(self.off, h)),
-        };
-        self.icon(icon, r.x, r.y, icon_c);
-        self.text(label, r.x + ICON + ICON_GAP, r.y, TEXT, Weight::NORMAL, label_c);
-    }
+fn paint(c: [u8; 3]) -> Paint<'static> {
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(c[0], c[1], c[2], 255);
+    paint
 }
 
 fn make_attrs(family: &str, weight: Weight) -> Attrs<'_> {
@@ -1268,7 +1342,7 @@ impl PointerHandler for App {
                     if self.drag.is_some() {
                         self.drag_to(x);
                     } else {
-                        let new_hover = self.hover_at(x, y);
+                        let new_hover = self.item_at(x, y);
                         if new_hover != self.hover {
                             self.hover = new_hover;
                             self.draw();
@@ -1276,8 +1350,8 @@ impl PointerHandler for App {
                     }
                 }
                 PointerEventKind::Leave { .. } => {
-                    if self.hover != Hover::None {
-                        self.hover = Hover::None;
+                    if self.hover.is_some() {
+                        self.hover = None;
                         self.draw();
                     }
                 }
@@ -1301,8 +1375,9 @@ impl LayerShellHandler for App {
         self.exit = true;
     }
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
-        if configure.new_size.0 > 0 { self.width = configure.new_size.0; }
-        if configure.new_size.1 > 0 { self.height = configure.new_size.1; }
+        self.width = configure.new_size.0;
+        let lay = self.layout();
+        if lay.end > self.width as f32 { eprintln!("rail: content is {:.0}px wide but the bar is {}px; lower `height`", lay.end, self.width); }
         self.draw();
     }
 }
@@ -1328,6 +1403,8 @@ fn main() {
         run_alarm(args[2].parse().unwrap(), args[3].parse().unwrap(), &load_config());
         return;
     }
+    // --pin: reserve space right away instead of deciding between peek and pin from the toggle key
+    let pin = args.get(1).map(String::as_str) == Some("--pin");
 
     // Install SIGUSR2 handler immediately — must be before any setup so we
     // catch the release signal even if the key is released during startup.
@@ -1365,30 +1442,17 @@ fn main() {
     let headphones = is_headphones(&cfg.bt_device_1);
 
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, event_queue) = registry_queue_init::<App>(&conn).unwrap();
+    let (globals, mut event_queue) = registry_queue_init::<App>(&conn).unwrap();
     let qh = event_queue.handle();
-
-    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
-    let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), event_queue).insert(loop_handle).unwrap();
 
     let compositor = CompositorState::bind(&globals, &qh).unwrap();
     let layer_shell = LayerShell::bind(&globals, &qh).unwrap();
     let shm = Shm::bind(&globals, &qh).unwrap();
     let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).unwrap();
 
-    // The panel's height depends on which level rows this machine has
-    let battery = read_battery();
-    let brightness = read_brightness();
-    let (width, height) = (WIDTH.round() as u32, panel_height(1 + battery.is_some() as u32 + brightness.is_some() as u32));
-
-    let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("wavedash"), None);
-    layer.set_size(width, height);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    layer.wl_surface().commit();
-
-    let pool = SlotPool::new((width * height * 4) as usize, &shm).unwrap();
+    let height = cfg.height;
+    let sz = Sz::new(height);
+    let pool = SlotPool::new((1920 * height * 4) as usize, &shm).unwrap();
 
     // Regular and bold faces of one family, selected by weight
     let mut db = cosmic_text::fontdb::Database::new();
@@ -1396,26 +1460,27 @@ fn main() {
     db.load_font_data(std::fs::read(expand_path(&cfg.font_bold)).expect("failed to read bold font file"));
     let font_family = db.faces().next().expect("font file contains no faces").families[0].0.clone();
     let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
-    let cw = measure_text(&mut font_system, "0000000000", TEXT, &font_family, Weight::NORMAL) / 10.0;
-    let clock_cw = measure_text(&mut font_system, "0000000000", CLOCK, &font_family, Weight::BOLD) / 10.0;
+    let cw = measure_text(&mut font_system, "0000000000", sz.text, &font_family, Weight::NORMAL) / 10.0;
+    let clock_cw = measure_text(&mut font_system, "0000000000", sz.clock, &font_family, Weight::BOLD) / 10.0;
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
         output_state: OutputState::new(&globals, &qh),
         shm,
-        layer,
+        layer: None,
         pointer: None,
         cursor_shape_manager,
         pool,
-        width,
+        width: 0,
         height,
+        sz,
         exit: false,
         font_system,
         swash_cache: SwashCache::new(),
         colors,
         font_family,
-        icons: Icons::new(ICON.round() as u32),
+        icons: Icons::new(sz.icon as u32),
         cw,
         clock_cw,
         timer1_duration: st.timer1_duration,
@@ -1431,7 +1496,7 @@ fn main() {
         bt_device_1: cfg.bt_device_1,
         audio_device_2: cfg.audio_device_2,
         is_dim: false,
-        hover: Hover::None,
+        hover: None,
         drag: None,
         volume_dirty: false,
         brightness_dirty: false,
@@ -1447,87 +1512,38 @@ fn main() {
         weather_is_day: st.weather_is_day,
         weather_fetched: st.weather_fetched,
         weather_fetch,
-        battery,
+        battery: read_battery(),
         battery_read_at: now_unix(),
-        brightness,
+        brightness: read_brightness(),
         brightness_set_at: 0,
         notif_paused,
-        long_press: None,
+        long_press: pin.then_some(false),
         startup: Instant::now(),
+        shown: String::new(),
     };
 
-    // Redraw tick (~30fps, so the finished-timer pulse is smooth); audio state is polled less often since it shells out
-    let timer = Timer::from_duration(std::time::Duration::from_millis(TICK_MS));
-    event_loop.handle().insert_source(timer, |_, _, app| {
-        // Long press detection: after grace period, decide mode based on whether key was released
-        if app.long_press.is_none() && app.startup.elapsed().as_millis() >= LONG_PRESS_GRACE_MS as u128 {
-            app.long_press = Some(!GOT_SIGUSR2.load(Ordering::Acquire));
-        }
-        if app.long_press == Some(true) && GOT_SIGUSR2.load(Ordering::Acquire) {
-            app.exit = true;
-            return TimeoutAction::Drop;
-        }
-        if app.volume_dirty {
-            set_volume(app.volume);
-            app.volume_dirty = false;
-            app.volume_set_at = now_unix();
-        }
-        if app.brightness_dirty {
-            set_brightness(app.brightness.unwrap());
-            app.brightness_dirty = false;
-            app.brightness_set_at = now_unix();
-        }
-        if app.drag.is_none() && app.audio_refreshed.elapsed().as_millis() >= AUDIO_REFRESH_MS && now_unix() - app.volume_set_at >= AUDIO_REFRESH_COOLDOWN {
-            app.refresh_audio();
-            app.audio_refreshed = Instant::now();
-        }
-        if now_unix() - app.battery_read_at >= BATTERY_REFRESH {
-            app.battery = read_battery();
-            app.battery_read_at = now_unix();
-        }
-        // Re-read backlight (external hotkeys) unless we just set it
-        if app.drag.is_none() && app.brightness.is_some() && now_unix() - app.brightness_set_at >= AUDIO_REFRESH_COOLDOWN {
-            app.brightness = read_brightness();
-        }
-        // Poll background weather fetch
-        let done = match app.weather_fetch.as_mut() {
-            Some(child) => child.try_wait().ok().flatten().is_some(),
-            None => false,
-        };
-        if done {
-            let child = app.weather_fetch.take().unwrap();
-            if let Ok(output) = child.wait_with_output() {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    // Scope to "current":{ to skip "current_units"
-                    if let Some(ci) = text.find("\"current\":{") {
-                        let s = &text[ci..];
-                        let num_at = |s: &str, needle: &str| -> Option<f64> {
-                            let after = s[s.find(needle)? + needle.len()..].trim_start();
-                            after[..after.find(|c: char| c == ',' || c == '}')?].trim().parse().ok()
-                        };
-                        let temp = num_at(s, "\"temperature_2m\":");
-                        let feels = num_at(s, "\"apparent_temperature\":");
-                        let code = num_at(s, "\"weather_code\":").map(|v| v as u32);
-                        let is_day = num_at(s, "\"is_day\":").map(|v| v as u32 == 1);
-                        if let (Some(temp), Some(feels), Some(code), Some(is_day)) = (temp, feels, code, is_day) {
-                            app.weather_temp = temp;
-                            app.weather_feels = feels;
-                            app.weather_code = code;
-                            app.weather_is_day = is_day;
-                            app.weather_fetched = now_unix();
-                            save_state(&app.state());
-                        }
-                    }
-                }
-            }
-        }
-        app.draw();
-        TimeoutAction::ToDuration(std::time::Duration::from_millis(TICK_MS))
-    }).unwrap();
+    // The configured output by name (needs a roundtrip to learn output names); otherwise the compositor's pick, the focused monitor
+    let output = cfg.output.as_ref().map(|name| {
+        event_queue.roundtrip(&mut app).unwrap();
+        app.output_state.outputs().find(|o| app.output_state.info(o).and_then(|i| i.name).as_ref() == Some(name))
+            .unwrap_or_else(|| panic!("no output named {name}"))
+    });
+
+    // Across the top edge. Pinned bars push windows down; a peek floats over them.
+    let surface = compositor.create_surface(&qh);
+    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Top, Some("rail"), output.as_ref());
+    layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
+    layer.set_size(0, height);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    app.layer = Some(layer);
+    if pin { app.reserve(); } else { app.layer().commit(); }
+
+    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+    WaylandSource::new(conn.clone(), event_queue).insert(event_loop.handle()).unwrap();
 
     loop {
-        event_loop.dispatch(std::time::Duration::from_millis(TICK_MS), &mut app).unwrap();
+        event_loop.dispatch(app.next_timeout(), &mut app).unwrap();
+        app.tick();
         if app.exit {
             save_state(&app.state());
             break;
